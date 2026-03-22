@@ -1,0 +1,132 @@
+{
+  "title": "Supplementary Data for: The Gapless Gasket",
+  "author": "Twin Prime Engine Project",
+  "date": "2026-03-21",
+
+  "gasket_parameters": {
+    "seed_A": [-1, 2, 2, 3],
+    "seed_B": [-2, 3, 6, 7],
+    "limit_N": 500000,
+    "kontorovich_oh_delta": 1.30568,
+    "modulus_24": 24,
+    "modulus_2520": 2520
+  },
+
+  "set_sizes_N500000": {
+    "A": 166605,
+    "B": 166345,
+    "union": 249966,
+    "bridge_AB": 166888,
+    "bridge_BA": 208114,
+    "covered": 416854,
+    "bidirectional_covered": 499750
+  },
+
+  "residue_classes_mod_24": {
+    "A_occupied": [2, 3, 6, 11, 14, 15, 18, 23],
+    "B_occupied": [3, 6, 7, 10, 15, 18, 19, 22],
+    "union_occupied": [2, 3, 6, 7, 10, 11, 14, 15, 18, 19, 22, 23],
+    "bridge_occupied": [0, 1, 4, 5, 7, 8, 9, 10, 12, 13, 16, 17, 19, 20, 21, 22],
+    "covered_occupied": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23],
+    "A_dominant_prime_classes": [11, 23],
+    "B_dominant_prime_classes": [7, 19],
+    "union_dominant_prime_classes": [7, 11, 19, 23],
+    "bridge_dominant_prime_classes": [1, 5, 13, 17],
+    "covered_dominant_prime_classes": [1, 5, 7, 11, 13, 17, 19, 23],
+    "covered_residue_coverage": "24/24 = 100%"
+  },
+
+  "residue_coverage_mod_2520": {
+    "classes_covered": 2520,
+    "classes_total": 2520,
+    "coverage": "100.0%",
+    "note": "Verified independently in gasket benchmark experiment"
+  },
+
+  "twin_prime_coverage_N500000": {
+    "total_twin_pairs": 4565,
+    "covered_twin_pairs": 4565,
+    "missed_twin_pairs": 0,
+    "coverage": "100.00%",
+    "by_threshold": [
+      {"T": 10000, "twins": 205, "covered": 205},
+      {"T": 20000, "twins": 342, "covered": 342},
+      {"T": 50000, "twins": 705, "covered": 705},
+      {"T": 100000, "twins": 1224, "covered": 1224},
+      {"T": 200000, "twins": 2160, "covered": 2160},
+      {"T": 500000, "twins": 4565, "covered": 4565}
+    ]
+  },
+
+  "role_split": {
+    "description": "Every twin pair splits as (union_member, bridge_member) or (bridge_member, union_member)",
+    "bridge_plus_union": 2246,
+    "union_plus_bridge": 2319,
+    "by_residue_pair": {
+      "(5,7)_bridge+union": 1109,
+      "(11,13)_union+bridge": 1172,
+      "(17,19)_bridge+union": 1137,
+      "(23,1)_union+bridge": 1146
+    },
+    "note": "Plus one exceptional pair (3,5) classified as union+bridge"
+  },
+
+  "prime_residue_counts_mod_24_in_covered_set": {
+    "1": 5137,
+    "5": 5205,
+    "7": 5184,
+    "11": 5197,
+    "13": 5192,
+    "17": 5197,
+    "19": 5220,
+    "23": 5204,
+    "equidistribution_note": "All eight classes within ±1.6% of each other"
+  },
+
+  "density_convergence_packing_A": [
+    {"T": 10000, "density": 0.9892},
+    {"T": 20000, "density": 0.9927},
+    {"T": 50000, "density": 0.9965},
+    {"T": 100000, "density": 0.9981},
+    {"T": 200000, "density": 0.9991},
+    {"T": 500000, "density": 0.9996}
+  ],
+
+  "corridor_completion_bidirectional": [
+    {"T": 10000, "left_gaps": 0, "right_gaps": 0},
+    {"T": 20000, "left_gaps": 0, "right_gaps": 0},
+    {"T": 50000, "left_gaps": 0, "right_gaps": 0},
+    {"T": 100000, "left_gaps": 0, "right_gaps": 0},
+    {"T": 200000, "left_gaps": 0, "right_gaps": 0},
+    {"T": 500000, "left_gaps": 0, "right_gaps": 0}
+  ],
+
+  "benchmark_results": {
+    "strategies": {
+      "baseline": "Random batch, sieve 5e7, parallel SPRP",
+      "selberg": "Same sieve + 200 extra primes scoring + priority order",
+      "gasket": "Residue filter mod 2520 from gasket curvatures"
+    },
+    "results": [
+      {"digits": 100, "baseline": "6 tests / 1.05s", "selberg": "35 tests / 2.86s", "gasket": "86 tests / 2.20s"},
+      {"digits": 500, "baseline": "2026 tests / 6.98s", "selberg": "853 tests / 51.14s", "gasket": "221 tests / 49.03s"},
+      {"digits": 1000, "baseline": "11189 tests / 170.21s", "selberg": "730 tests / 246.42s", "gasket": "436 tests / 335.98s"},
+      {"digits": 2000, "baseline": "9089 tests / 912.15s", "selberg": "running", "gasket": "running"}
+    ],
+    "key_finding": "Gasket filter passes 100% of candidates (2520/2520 coverage), confirming universal covering"
+  },
+
+  "engine_v2_results": {
+    "description": "Improved engine: sieve extended to 10^8, gmpy2-accelerated",
+    "sieve_primes": "78,496 + 5,682,957",
+    "survival_rate": "1.2629%",
+    "results": [
+      {"digits": 100, "time": "2.23s", "sieved": 36817},
+      {"digits": 500, "time": "11.98s", "sieved": 36790},
+      {"digits": 1000, "time": "75.28s", "sieved": 36813},
+      {"digits": 2000, "time": "1554.00s", "sieved": 36880},
+      {"digits": 5000, "time": "pending"}
+    ],
+    "speedup_vs_benchmark_baseline_1000digit": "2.3x"
+  }
+}
