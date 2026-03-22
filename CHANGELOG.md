@@ -10,6 +10,9 @@
 ### Three-tier sieve + inline survivor testing
 
 **Key changes:**
+- Compact sieve-tier cache uses `u32` prime/inverse tables instead of `u64`
+  - Cuts resident reusable prime-plan memory roughly in half
+  - Measured cache footprint: ~84.5 MB instead of ~169 MB for the same tiers
 - Bitset Eratosthenes sieve (8x less memory for prime generation: 25MB vs 200MB)
 - Three-tier algebraic sieve: base (10^6) + extended (10^8) + deep (2×10^8)
   - Deep tier adds ~5.2M primes for targets ≥1500 digits

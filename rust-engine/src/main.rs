@@ -35,7 +35,7 @@ use std::time::Instant;
 
 /// Bitset Sieve of Eratosthenes — 8× less memory than bool array.
 /// Uses packed u8 bitset: bit i of byte[i/8] represents number i.
-fn prime_sieve(limit: usize) -> Vec<u64> {
+fn prime_sieve(limit: usize) -> Vec<u32> {
     let num_bytes = limit / 8 + 1;
     let mut sieve = vec![0xFFu8; num_bytes];
     // Clear bits 0 and 1 (not prime)
@@ -69,7 +69,7 @@ fn prime_sieve(limit: usize) -> Vec<u64> {
                 break;
             }
             if num >= 2 {
-                primes.push(num as u64);
+                primes.push(num as u32);
             }
             b &= b - 1;
         }
@@ -78,50 +78,51 @@ fn prime_sieve(limit: usize) -> Vec<u64> {
 }
 
 /// Compute modular inverse of 6 mod p using Fermat's little theorem.
-fn inv6_mod(p: u64) -> u64 {
+fn inv6_mod(p: u32) -> u32 {
+    let p64 = p as u64;
     let mut result: u64 = 1;
-    let mut base: u64 = 6 % p;
-    let mut exp = p - 2;
+    let mut base: u64 = 6 % p64;
+    let mut exp = p64 - 2;
     while exp > 0 {
         if exp & 1 == 1 {
-            result = ((result as u128 * base as u128) % p as u128) as u64;
+            result = ((result as u128 * base as u128) % p64 as u128) as u64;
         }
-        base = ((base as u128 * base as u128) % p as u128) as u64;
+        base = ((base as u128 * base as u128) % p64 as u128) as u64;
         exp >>= 1;
     }
-    result
+    result as u32
 }
 
 struct SieveData {
-    primes_small: Vec<u64>,
-    inv6_small: Vec<u64>,
-    primes_ext: Vec<u64>,
-    inv6_ext: Vec<u64>,
-    primes_deep: Vec<u64>,
-    inv6_deep: Vec<u64>,
+    primes_small: Vec<u32>,
+    inv6_small: Vec<u32>,
+    primes_ext: Vec<u32>,
+    inv6_ext: Vec<u32>,
+    primes_deep: Vec<u32>,
+    inv6_deep: Vec<u32>,
 }
 
 impl SieveData {
     fn build(sieve_limit: usize) -> Self {
         let all_primes = prime_sieve(sieve_limit);
-        let primes_small: Vec<u64> = all_primes
+        let primes_small: Vec<u32> = all_primes
             .iter()
             .copied()
             .filter(|&p| p >= 5 && p <= 1_000_000)
             .collect();
-        let inv6_small: Vec<u64> = primes_small.iter().map(|&p| inv6_mod(p)).collect();
-        let primes_ext: Vec<u64> = all_primes
+        let inv6_small: Vec<u32> = primes_small.iter().map(|&p| inv6_mod(p)).collect();
+        let primes_ext: Vec<u32> = all_primes
             .iter()
             .copied()
             .filter(|&p| p > 1_000_000 && p <= 100_000_000)
             .collect();
-        let inv6_ext: Vec<u64> = primes_ext.iter().map(|&p| inv6_mod(p)).collect();
-        let primes_deep: Vec<u64> = all_primes
+        let inv6_ext: Vec<u32> = primes_ext.iter().map(|&p| inv6_mod(p)).collect();
+        let primes_deep: Vec<u32> = all_primes
             .iter()
             .copied()
             .filter(|&p| p > 100_000_000)
             .collect();
-        let inv6_deep: Vec<u64> = primes_deep.iter().map(|&p| inv6_mod(p)).collect();
+        let inv6_deep: Vec<u32> = primes_deep.iter().map(|&p| inv6_mod(p)).collect();
         SieveData {
             primes_small,
             inv6_small,
@@ -131,21 +132,32 @@ impl SieveData {
             inv6_deep,
         }
     }
+
+    fn cache_bytes(&self) -> usize {
+        (self.primes_small.len()
+            + self.inv6_small.len()
+            + self.primes_ext.len()
+            + self.inv6_ext.len()
+            + self.primes_deep.len()
+            + self.inv6_deep.len())
+            * std::mem::size_of::<u32>()
+    }
 }
 
 /// Run base sieve (primes to 10^6) on a packed bitset.
 /// Each bit in alive[] represents one candidate m value.
 fn base_sieve(alive: &mut [u64], batch_size: usize, m_start: &Integer, sieve: &SieveData) {
     for (idx, &p) in sieve.primes_small.iter().enumerate() {
-        let inv6 = sieve.inv6_small[idx];
-        let m_mod_p = m_start.mod_u(p as u32) as u64;
+        let p_u64 = p as u64;
+        let inv6 = sieve.inv6_small[idx] as u64;
+        let m_mod_p = m_start.mod_u(p) as u64;
         let p_us = p as usize;
 
         // Offset where 6(m_start + r1) - 1 ≡ 0 (mod p)
         let r1 = if inv6 >= m_mod_p {
             (inv6 - m_mod_p) as usize
         } else {
-            (p + inv6 - m_mod_p) as usize
+            (p_u64 + inv6 - m_mod_p) as usize
         };
         let mut j = r1;
         while j < batch_size {
@@ -156,11 +168,11 @@ fn base_sieve(alive: &mut [u64], batch_size: usize, m_start: &Integer, sieve: &S
         }
 
         // Offset where 6(m_start + r2) + 1 ≡ 0 (mod p)
-        let complement = p - inv6;
+        let complement = p_u64 - inv6;
         let r2 = if complement >= m_mod_p {
             (complement - m_mod_p) as usize
         } else {
-            (p + complement - m_mod_p) as usize
+            (p_u64 + complement - m_mod_p) as usize
         };
         let mut j = r2;
         while j < batch_size {
@@ -180,14 +192,15 @@ fn extended_sieve(
     sieve: &SieveData,
 ) {
     for (idx, &p) in sieve.primes_ext.iter().enumerate() {
-        let inv6 = sieve.inv6_ext[idx];
-        let m_mod_p = m_start.mod_u(p as u32) as u64;
+        let p_u64 = p as u64;
+        let inv6 = sieve.inv6_ext[idx] as u64;
+        let m_mod_p = m_start.mod_u(p) as u64;
         let p_us = p as usize;
 
         let r1 = if inv6 >= m_mod_p {
             (inv6 - m_mod_p) as usize
         } else {
-            (p + inv6 - m_mod_p) as usize
+            (p_u64 + inv6 - m_mod_p) as usize
         };
         if r1 < batch_size {
             let mut j = r1;
@@ -199,11 +212,11 @@ fn extended_sieve(
             }
         }
 
-        let complement = p - inv6;
+        let complement = p_u64 - inv6;
         let r2 = if complement >= m_mod_p {
             (complement - m_mod_p) as usize
         } else {
-            (p + complement - m_mod_p) as usize
+            (p_u64 + complement - m_mod_p) as usize
         };
         if r2 < batch_size {
             let mut j = r2;
@@ -226,14 +239,15 @@ fn deep_sieve(
     sieve: &SieveData,
 ) {
     for (idx, &p) in sieve.primes_deep.iter().enumerate() {
-        let inv6 = sieve.inv6_deep[idx];
-        let m_mod_p = m_start.mod_u(p as u32) as u64;
+        let p_u64 = p as u64;
+        let inv6 = sieve.inv6_deep[idx] as u64;
+        let m_mod_p = m_start.mod_u(p) as u64;
         let p_us = p as usize;
 
         let r1 = if inv6 >= m_mod_p {
             (inv6 - m_mod_p) as usize
         } else {
-            (p + inv6 - m_mod_p) as usize
+            (p_u64 + inv6 - m_mod_p) as usize
         };
         if r1 < batch_size {
             let mut j = r1;
@@ -245,11 +259,11 @@ fn deep_sieve(
             }
         }
 
-        let complement = p - inv6;
+        let complement = p_u64 - inv6;
         let r2 = if complement >= m_mod_p {
             (complement - m_mod_p) as usize
         } else {
-            (p + complement - m_mod_p) as usize
+            (p_u64 + complement - m_mod_p) as usize
         };
         if r2 < batch_size {
             let mut j = r2;
@@ -605,6 +619,8 @@ fn main() {
     let t_pre = Instant::now();
     let sieve = SieveData::build(200_000_000);
     let setup_time = t_pre.elapsed().as_secs_f64();
+    let sieve_cache_mb = sieve.cache_bytes() as f64 / (1024.0 * 1024.0);
+    println!("Prime cache: {:.1} MB", sieve_cache_mb);
     println!(
         "Sieve: {} base (to 10^6), {} extended (to 10^8), {} deep (to 2×10^8) [{:.2}s]",
         sieve.primes_small.len(),
