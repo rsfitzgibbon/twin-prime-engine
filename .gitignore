@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.pyo
+rust-engine/target/
+rust-engine/twin_prime_engine_results.json
+rust_twin_prime_finder/target/
+

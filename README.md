@@ -7,6 +7,25 @@ High-performance twin prime finder. The **Rust v5 engine** discovers **2000-digi
 
 ---
 
+## Repository Roles
+
+This repo is the **curated release-facing engine branch**.
+
+Use this repo for:
+
+- canonical engine code
+- public benchmark claims
+- release notes
+- the canonical paper copy
+
+The active experimental branch lives at:
+
+- `Newtheory`
+
+That branch owns exploratory theory work and prototypes until they are promoted here.
+
+---
+
 ## Performance
 
 ### Rust v5 (GMP + In-place Ops + Bitset Sieve)
@@ -99,6 +118,13 @@ cargo build --release
 Requires Rust 1.70+ and MSYS2/MinGW (Windows) or GCC (Linux/macOS).
 On Windows, GMP is provided via MSYS2: `pacman -S mingw-w64-x86_64-gmp`
 
+Current repo configuration targets GNU Windows by default via `.cargo/config.toml`.
+If your Rust installation only has MSVC, install the GNU target first:
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+```
+
 ### Python Engine
 
 ```bash
@@ -107,6 +133,18 @@ python twin_prime_engine.py
 ```
 
 Requires Python 3.10+, gmpy2, NumPy.
+
+### Practical Finder
+
+The repo also carries the promoted finite-range finder path:
+
+```bash
+python twin_prime_finder.py --limit 1000000 --mode high_precision --preview 20
+python twin_prime_finder.py --limit 1000000 --mode high_precision --engine rust --preview 20
+```
+
+This path is aimed at candidate generation, ranking, and finite-range benchmarking,
+not the large-digit search engine pipeline above.
 
 ## Key Insight: Selberg Integration
 
@@ -143,6 +181,9 @@ Two primitive Apollonian circle packings with seeds (−1,2,2,3) and (−2,3,6,7
 | `twin_prime_engine.py` | Python v2 engine (gmpy2 + NumPy) |
 | `twin_prime_gasket_test.py` | Benchmark: Baseline vs Selberg vs Gasket |
 | `spectral_twin_prime_v2.py` | Apollonian gasket generation & coverage analysis |
+| `twin_prime_finder.py` | Practical finite-range corridor + arithmetic finder |
+| `rust_twin_prime_finder/` | Rust acceleration for the practical finder path |
+| `twin_prime_finder_rust_benchmark.py` | Python-vs-Rust benchmark harness for the finder |
 | `paper/gapless_gasket.tex` | Full LaTeX research paper |
 | `paper/supplementary_data.json` | All numerical evidence (JSON) |
 
