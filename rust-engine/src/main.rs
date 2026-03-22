@@ -1,4 +1,10 @@
-//! Twin Prime Search Engine v5 — Optimized GMP-accelerated Rust implementation
+//! Twin Prime Search Engine v5.1 — Optimized GMP-accelerated Rust implementation
+//!
+//! v5.1 optimizations over v5:
+//! - Bitset Eratosthenes (8× less memory for prime generation → enables deeper sieve)
+//! - Three-tier sieve: base (10^6) + extended (10^8) + deep (2×10^8) for high digits
+//! - Inline survivor testing: iterate bitset directly, no Vec<u64> allocation
+//! - Hardware popcount for survivor counting
 //!
 //! v5 optimizations over v4:
 //! - Packed bitset sieve (8× smaller working set → fits L2 cache, better locality)
@@ -9,8 +15,9 @@
 //! - Adaptive batch sizing per digit target
 //!
 //! Architecture:
-//! 1. Sieve of Eratosthenes to 10^8 for prime table
-//! 2. Two-tier algebraic sieve on packed bitset: base (to 10^6) + extended (to 10^8)
+//! 1. Bitset Sieve of Eratosthenes to 2×10^8 for prime table
+//! 2. Three-tier algebraic sieve on packed bitset:
+//!    base (to 10^6) + extended (to 10^8) + deep (to 2×10^8)
 //!    Twin primes form (6m-1, 6m+1), sieve eliminates m where 6m±1 ≡ 0 (mod p)
 //! 3. SPRP(2) on p1, then p2 (short-circuit), then SPRP(3,5,7) on survivors
 //! 4. BPPSW confirmation (Lucas PRP via GMP) — deterministic for all known composites
@@ -26,29 +33,48 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Sieve of Eratosthenes returning all primes up to limit.
+/// Bitset Sieve of Eratosthenes — 8× less memory than bool array.
+/// Uses packed u8 bitset: bit i of byte[i/8] represents number i.
 fn prime_sieve(limit: usize) -> Vec<u64> {
-    let mut is_prime = vec![true; limit + 1];
-    is_prime[0] = false;
-    if limit > 0 {
-        is_prime[1] = false;
-    }
+    let num_bytes = limit / 8 + 1;
+    let mut sieve = vec![0xFFu8; num_bytes];
+    // Clear bits 0 and 1 (not prime)
+    sieve[0] &= 0b11111100;
+
     let sqrt_limit = (limit as f64).sqrt() as usize;
     for p in 2..=sqrt_limit {
-        if is_prime[p] {
+        if sieve[p >> 3] & (1u8 << (p & 7)) != 0 {
             let mut j = p * p;
             while j <= limit {
-                is_prime[j] = false;
+                sieve[j >> 3] &= !(1u8 << (j & 7));
                 j += p;
             }
         }
     }
-    is_prime
-        .iter()
-        .enumerate()
-        .filter(|(_, &b)| b)
-        .map(|(i, _)| i as u64)
-        .collect()
+
+    // Collect primes using bit tricks (faster than per-number iteration)
+    let est = limit / ((limit as f64).ln() as usize).max(1);
+    let mut primes = Vec::with_capacity(est);
+    for byte_idx in 0..num_bytes {
+        let byte = sieve[byte_idx];
+        if byte == 0 {
+            continue;
+        }
+        let base = byte_idx * 8;
+        let mut b = byte;
+        while b != 0 {
+            let bit = b.trailing_zeros() as usize;
+            let num = base + bit;
+            if num > limit {
+                break;
+            }
+            if num >= 2 {
+                primes.push(num as u64);
+            }
+            b &= b - 1;
+        }
+    }
+    primes
 }
 
 /// Compute modular inverse of 6 mod p using Fermat's little theorem.
@@ -71,6 +97,8 @@ struct SieveData {
     inv6_small: Vec<u64>,
     primes_ext: Vec<u64>,
     inv6_ext: Vec<u64>,
+    primes_deep: Vec<u64>,
+    inv6_deep: Vec<u64>,
 }
 
 impl SieveData {
@@ -85,14 +113,22 @@ impl SieveData {
         let primes_ext: Vec<u64> = all_primes
             .iter()
             .copied()
-            .filter(|&p| p > 1_000_000)
+            .filter(|&p| p > 1_000_000 && p <= 100_000_000)
             .collect();
         let inv6_ext: Vec<u64> = primes_ext.iter().map(|&p| inv6_mod(p)).collect();
+        let primes_deep: Vec<u64> = all_primes
+            .iter()
+            .copied()
+            .filter(|&p| p > 100_000_000)
+            .collect();
+        let inv6_deep: Vec<u64> = primes_deep.iter().map(|&p| inv6_mod(p)).collect();
         SieveData {
             primes_small,
             inv6_small,
             primes_ext,
             inv6_ext,
+            primes_deep,
+            inv6_deep,
         }
     }
 }
@@ -181,25 +217,50 @@ fn extended_sieve(
     }
 }
 
-/// Collect survivor indices from packed bitset using bit tricks.
-fn collect_survivors(alive: &[u64], batch_size: usize) -> Vec<u64> {
-    let mut result = Vec::new();
-    for (word_idx, &word) in alive.iter().enumerate() {
-        if word == 0 {
-            continue;
-        }
-        let base = (word_idx as u64) << 6;
-        let mut w = word;
-        while w != 0 {
-            let bit = w.trailing_zeros() as u64;
-            let idx = base + bit;
-            if idx < batch_size as u64 {
-                result.push(idx);
+/// Run deep sieve (primes 10^8 to 2×10^8) on a packed bitset.
+/// Used for high-digit targets (≥1500 digits) where SPRP testing dominates.
+fn deep_sieve(
+    alive: &mut [u64],
+    batch_size: usize,
+    m_start: &Integer,
+    sieve: &SieveData,
+) {
+    for (idx, &p) in sieve.primes_deep.iter().enumerate() {
+        let inv6 = sieve.inv6_deep[idx];
+        let m_mod_p = m_start.mod_u(p as u32) as u64;
+        let p_us = p as usize;
+
+        let r1 = if inv6 >= m_mod_p {
+            (inv6 - m_mod_p) as usize
+        } else {
+            (p + inv6 - m_mod_p) as usize
+        };
+        if r1 < batch_size {
+            let mut j = r1;
+            while j < batch_size {
+                unsafe {
+                    *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
+                }
+                j += p_us;
             }
-            w &= w - 1; // clear lowest set bit
+        }
+
+        let complement = p - inv6;
+        let r2 = if complement >= m_mod_p {
+            (complement - m_mod_p) as usize
+        } else {
+            (p + complement - m_mod_p) as usize
+        };
+        if r2 < batch_size {
+            let mut j = r2;
+            while j < batch_size {
+                unsafe {
+                    *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
+                }
+                j += p_us;
+            }
         }
     }
-    result
 }
 
 /// Pre-allocated buffers for SPRP testing — eliminates per-test allocations.
@@ -321,16 +382,17 @@ impl TestCtx {
     }
 }
 
-/// Adaptive parameters: batch size and sieve mode per digit target.
+/// Adaptive parameters: batch size and sieve depth per digit target.
 /// Larger batches amortize the per-prime mod_u cost in the sieve phase.
 /// All batch sizes are multiples of 64 for bitset alignment.
-fn get_params(target_digits: u32) -> (usize, bool) {
+/// Sieve depth: 0 = base only (to 10^6), 1 = + extended (to 10^8), 2 = + deep (to 2×10^8)
+fn get_params(target_digits: u32) -> (usize, u8) {
     match target_digits {
-        0..=150 => (512_000, false),       // 500K, base sieve only (sieve-dominated)
-        151..=500 => (2_048_000, true),     // 2M, full sieve
-        501..=1500 => (5_120_000, true),    // 5M, full sieve
-        1501..=3000 => (10_240_000, true),  // 10M, full sieve (balanced)
-        _ => (20_480_000, true),            // 20M, full sieve (testing-dominated)
+        0..=150 => (512_000, 0),        // 500K, base sieve only (sieve-dominated)
+        151..=500 => (2_048_000, 1),     // 2M, extended sieve
+        501..=1500 => (5_120_000, 1),    // 5M, extended sieve
+        1501..=3000 => (10_240_000, 2),  // 10M, deep sieve (testing-dominated)
+        _ => (20_480_000, 2),            // 20M, deep sieve (testing-dominated)
     }
 }
 
@@ -356,7 +418,7 @@ fn search_twins(
     max_seconds: f64,
     sieve: &SieveData,
 ) -> (SearchResult, Option<(Integer, Integer)>) {
-    let (batch_size, use_extended) = get_params(target_digits);
+    let (batch_size, sieve_depth) = get_params(target_digits);
     let words = batch_size / 64;
 
     let m_low = {
@@ -375,7 +437,11 @@ fn search_twins(
     let ln_n = (target_digits as f64) * std::f64::consts::LN_10;
     let hl_raw = ln_n * ln_n / (2.0 * 0.6601618158);
 
-    let sieve_mode = if use_extended { "full" } else { "base only" };
+    let sieve_mode = match sieve_depth {
+        0 => "base only",
+        1 => "extended",
+        _ => "deep",
+    };
     println!(
         "  Target: ~{} digits | HL est: {:.0} trials | Batch: {} | Sieve: {} | Bitset: {}KB",
         target_digits,
@@ -408,6 +474,7 @@ fn search_twins(
 
         let flag = found_flag.clone();
         let deadline = max_seconds;
+        let depth = sieve_depth;
         let results: Vec<_> = batch_starts
             .into_par_iter()
             .map(|m_start| {
@@ -418,29 +485,45 @@ fn search_twins(
                 // Sieve phase: packed bitset (8x smaller than bool array)
                 let mut alive = vec![u64::MAX; words];
                 base_sieve(&mut alive, batch_size, &m_start, sieve);
-                if use_extended {
+                if depth >= 1 {
                     extended_sieve(&mut alive, batch_size, &m_start, sieve);
                 }
+                if depth >= 2 {
+                    deep_sieve(&mut alive, batch_size, &m_start, sieve);
+                }
 
-                let survivors = collect_survivors(&alive, batch_size);
-                let n_surv = survivors.len() as u64;
+                // Count survivors via hardware popcount (no Vec allocation)
+                let n_surv: u64 = alive.iter().map(|&w| w.count_ones() as u64).sum();
 
-                // Test phase: zero-allocation in-place operations
+                // Test phase: iterate bitset directly, zero-allocation in-place operations
                 let mut ctx = TestCtx::new();
                 let mut tested = 0u64;
 
-                for &off in &survivors {
-                    if flag.load(Ordering::Relaxed) {
-                        break;
+                'outer: for (word_idx, &word) in alive.iter().enumerate() {
+                    if word == 0 {
+                        continue;
                     }
-                    // Check time budget every 64 candidates (amortize syscall)
-                    if tested & 63 == 0 && t0.elapsed().as_secs_f64() > deadline {
-                        break;
-                    }
-                    tested += 1;
-                    if let Some((p1, p2)) = ctx.test_candidate(off, &m_start) {
-                        flag.store(true, Ordering::Relaxed);
-                        return (batch_size as u64, n_surv, tested, Some((p1, p2)));
+                    let base = (word_idx as u64) << 6;
+                    let mut w = word;
+                    while w != 0 {
+                        if flag.load(Ordering::Relaxed) {
+                            break 'outer;
+                        }
+                        // Check time budget every 64 candidates (amortize syscall)
+                        if tested & 63 == 0 && t0.elapsed().as_secs_f64() > deadline {
+                            break 'outer;
+                        }
+                        let bit = w.trailing_zeros() as u64;
+                        let off = base + bit;
+                        if off >= batch_size as u64 {
+                            break;
+                        }
+                        tested += 1;
+                        if let Some((p1, p2)) = ctx.test_candidate(off, &m_start) {
+                            flag.store(true, Ordering::Relaxed);
+                            return (batch_size as u64, n_surv, tested, Some((p1, p2)));
+                        }
+                        w &= w - 1; // clear lowest set bit
                     }
                 }
 
@@ -512,20 +595,21 @@ fn search_twins(
 
 fn main() {
     let num_workers = num_cpus::get();
-    println!("Twin Prime Engine v5 (Rust + GMP, optimized)");
+    println!("Twin Prime Engine v5.1 (Rust + GMP, optimized)");
     println!(
-        "Rayon x{} | In-place SPRP(2,3,5,7) + BPPSW | Bitset sieve | Montgomery modpow",
+        "Rayon x{} | In-place SPRP(2,3,5,7) + BPPSW | 3-tier sieve | Montgomery modpow",
         num_workers
     );
     println!();
 
     let t_pre = Instant::now();
-    let sieve = SieveData::build(100_000_000);
+    let sieve = SieveData::build(200_000_000);
     let setup_time = t_pre.elapsed().as_secs_f64();
     println!(
-        "Sieve: {} base primes (to 10^6), {} extended (to 10^8) [{:.2}s]",
+        "Sieve: {} base (to 10^6), {} extended (to 10^8), {} deep (to 2×10^8) [{:.2}s]",
         sieve.primes_small.len(),
         sieve.primes_ext.len(),
+        sieve.primes_deep.len(),
         setup_time
     );
     println!();
@@ -613,7 +697,7 @@ fn main() {
     }
 
     let output = serde_json::json!({
-        "version": "v5-rust-gmp-optimized",
+        "version": "v5.1-rust-gmp-3tier-sieve",
         "workers": num_workers,
         "results": all_results,
     });

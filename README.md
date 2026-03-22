@@ -117,6 +117,8 @@ cargo build --release
 
 Requires Rust 1.70+ and MSYS2/MinGW (Windows) or GCC (Linux/macOS).
 On Windows, GMP is provided via MSYS2: `pacman -S mingw-w64-x86_64-gmp`
+Also ensure `C:\msys64\mingw64\bin` is on `PATH` when building the GNU target,
+or build from an MSYS2 MinGW shell so tools like `dlltool.exe` are visible.
 
 Current repo configuration targets GNU Windows by default via `.cargo/config.toml`.
 If your Rust installation only has MSVC, install the GNU target first:
