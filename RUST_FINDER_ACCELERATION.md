@@ -9,13 +9,13 @@ The Rust port targets the actual hot path in the practical finder:
 - corridor candidate generation
 - hard small-prime masking
 - optional soft rerank by next blocker
+- optional sieve-score ranking
 
 It does **not** currently replace:
 
 - geometry-role annotation
-- sieve-score ranking
 
-Those still run through the Python engine.
+Geometry annotations still run through the Python engine.
 
 ## New files
 
@@ -29,7 +29,7 @@ The existing Python CLI in `twin_prime_finder.py` now supports:
 - `--engine python`
 - `--engine rust`
 
-for the unscored / non-geometry path.
+for the arithmetic finder path, including `--score`.
 
 ## Why this target
 
@@ -58,19 +58,27 @@ So the comparison is stricter than a raw binary-only microbenchmark.
 At `N = 1,000,000`:
 
 - `fast`
-  - Python: `224.35 ms`
-  - Rust: `77.68 ms`
-  - Speedup: `2.89x` (`188.83%`)
+  - Python: `110.60 ms`
+  - Rust: `44.28 ms`
+  - Speedup: `2.50x` (`149.79%`)
 - `high_precision`
-  - Python: `281.77 ms`
-  - Rust: `59.12 ms`
-  - Speedup: `4.77x` (`376.64%`)
+  - Python: `137.54 ms`
+  - Rust: `35.99 ms`
+  - Speedup: `3.82x` (`282.14%`)
 - `exact_range`
-  - Python: `464.45 ms`
-  - Rust: `54.57 ms`
-  - Speedup: `8.51x` (`751.17%`)
+  - Python: `175.25 ms`
+  - Rust: `32.90 ms`
+  - Speedup: `5.33x` (`432.73%`)
+- `high_precision --score`
+  - Python: `277.48 ms`
+  - Rust: `46.87 ms`
+  - Speedup: `5.92x` (`492.06%`)
+- `high_precision --score --top-k 4000`
+  - Python: `272.19 ms`
+  - Rust: `32.53 ms`
+  - Speedup: `8.37x` (`736.86%`)
 
-So the Rust engine clears the stated `12%` usefulness threshold by a wide margin on the practical hard-mask path.
+So the Rust engine clears the stated `12%` usefulness threshold by a wide margin on both the hard-mask and scored-ranking paths.
 
 ## Honest limitation
 
@@ -88,16 +96,17 @@ What is proven here is narrower and real:
 ## Practical commands
 
 ```powershell
-python Newtheory\twin_prime_finder.py --limit 1000000 --mode high_precision --engine rust --preview 20
-python Newtheory\twin_prime_finder.py --benchmark --benchmark-limits 100000 500000 1000000 --engine rust
-python Newtheory\twin_prime_finder_rust_benchmark.py
+python twin_prime_finder.py --limit 1000000 --mode high_precision --engine rust --preview 20
+python twin_prime_finder.py --limit 1000000 --mode high_precision --engine rust --score --top-k 4000 --preview 20
+python twin_prime_finder.py --benchmark --benchmark-limits 100000 500000 1000000 --engine rust
+python twin_prime_finder_rust_benchmark.py
 ```
 
 ## Next engineering step
 
 If continuing this branch, the next worthwhile Rust target is:
 
-- soft-score / ranking support in Rust, so the `high_precision --score --top-k`
-  path can also move off Python
+- geometry-role annotation in the Rust result path
+- reducing subprocess / JSON overhead by exposing the Rust finder as an importable extension or library call
 
-That is the remaining practical ranking path with measurable value.
+The scored path is already off Python; the remaining gap is feature parity and interface overhead.

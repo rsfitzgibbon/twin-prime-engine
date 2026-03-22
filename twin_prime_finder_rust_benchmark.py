@@ -18,16 +18,27 @@ WORKLOADS = [
     {"limit_n": 1_000_000, "mode": "fast"},
     {"limit_n": 1_000_000, "mode": "high_precision"},
     {"limit_n": 1_000_000, "mode": "exact_range"},
+    {"limit_n": 1_000_000, "mode": "high_precision", "score": True},
+    {"limit_n": 1_000_000, "mode": "high_precision", "score": True, "top_k": 4000},
 ]
 
 REPEATS = 7
 
 
-def time_engine(limit_n, mode, engine):
+def workload_label(workload):
+    bits = [workload["mode"]]
+    if workload.get("score"):
+        bits.append("score")
+    if workload.get("top_k") is not None:
+        bits.append(f"top_k={workload['top_k']}")
+    return " + ".join(bits)
+
+
+def time_engine(engine, workload):
     best = None
     for _ in range(REPEATS):
         t0 = time.perf_counter()
-        result = finder.find_twin_candidates(limit_n=limit_n, mode=mode, engine=engine)
+        result = finder.find_twin_candidates(engine=engine, **workload)
         elapsed = time.perf_counter() - t0
         best = elapsed if best is None else min(best, elapsed)
     return best, result["candidate_count"]
@@ -41,21 +52,20 @@ def main():
     rows = []
     for workload in WORKLOADS:
         limit_n = workload["limit_n"]
-        mode = workload["mode"]
+        label = workload_label(workload)
 
-        py_time, py_count = time_engine(limit_n, mode, "python")
-        rust_time, rust_count = time_engine(limit_n, mode, "rust")
+        py_time, py_count = time_engine("python", workload)
+        rust_time, rust_count = time_engine("rust", workload)
         if py_count != rust_count:
             raise RuntimeError(
-                f"Candidate count mismatch for {mode}: python={py_count}, rust={rust_count}"
+                f"Candidate count mismatch for {label}: python={py_count}, rust={rust_count}"
             )
 
         speedup_factor = py_time / rust_time if rust_time else float("inf")
         speedup_percent = 100.0 * (speedup_factor - 1.0)
 
         row = {
-            "limit_n": limit_n,
-            "mode": mode,
+            **workload,
             "python_best_seconds": py_time,
             "rust_best_seconds": rust_time,
             "candidate_count": py_count,
@@ -66,7 +76,7 @@ def main():
         rows.append(row)
 
         print(
-            f"{mode:>14} @ N={limit_n:,}: "
+            f"{label:>28} @ N={limit_n:,}: "
             f"python={py_time*1000:.2f} ms, rust={rust_time*1000:.2f} ms, "
             f"speedup={speedup_factor:.2f}x ({speedup_percent:.2f}%)"
         )

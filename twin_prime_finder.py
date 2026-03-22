@@ -202,7 +202,8 @@ def rust_finder_available():
     return RUST_FINDER_EXE.exists()
 
 
-def find_twin_candidates_rust(limit_n, mode="high_precision", soft_to=None, top_k=None, custom_cutoff=None):
+def find_twin_candidates_rust(limit_n, mode="high_precision", soft_to=None, top_k=None,
+                              custom_cutoff=None, score=False, score_z=None):
     if not rust_finder_available():
         raise FileNotFoundError(f"Rust finder binary not found: {RUST_FINDER_EXE}")
 
@@ -223,12 +224,15 @@ def find_twin_candidates_rust(limit_n, mode="high_precision", soft_to=None, top_
             cmd += ["--top-k", str(top_k)]
         if custom_cutoff is not None:
             cmd += ["--cutoff", str(custom_cutoff)]
+        if score:
+            cmd += ["--score"]
+        if score_z is not None:
+            cmd += ["--score-z", str(score_z)]
 
         subprocess.run(cmd, check=True, capture_output=True, text=True)
 
         with open(json_path, "r", encoding="utf-8") as f:
             result = json.load(f)
-        result["engine"] = "rust"
         return result
     finally:
         try:
@@ -241,14 +245,16 @@ def find_twin_candidates(limit_n, mode="high_precision", soft_to=None, top_k=Non
                          include_geometry=False, custom_cutoff=None,
                          score=False, score_z=None, engine="python"):
     if engine == "rust":
-        if include_geometry or score:
-            raise ValueError("Rust engine currently supports hard-mask and soft-rerank paths only (no geometry or scoring).")
+        if include_geometry:
+            raise ValueError("Rust engine currently supports arithmetic candidate generation only (no geometry annotations).")
         return find_twin_candidates_rust(
             limit_n=limit_n,
             mode=mode,
             soft_to=soft_to,
             top_k=top_k,
             custom_cutoff=custom_cutoff,
+            score=score,
+            score_z=score_z,
         )
     if engine != "python":
         raise ValueError(f"Unknown engine: {engine}")

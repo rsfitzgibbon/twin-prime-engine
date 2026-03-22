@@ -143,10 +143,13 @@ The repo also carries the promoted finite-range finder path:
 ```bash
 python twin_prime_finder.py --limit 1000000 --mode high_precision --preview 20
 python twin_prime_finder.py --limit 1000000 --mode high_precision --engine rust --preview 20
+python twin_prime_finder.py --limit 1000000 --mode high_precision --engine rust --score --top-k 4000 --preview 20
 ```
 
 This path is aimed at candidate generation, ranking, and finite-range benchmarking,
-not the large-digit search engine pipeline above.
+not the large-digit search engine pipeline above. The promoted Rust finder now
+covers hard-mask generation, soft rerank, and sieve-score ranking; only geometry
+annotations remain Python-only.
 
 ## Key Insight: Selberg Integration
 

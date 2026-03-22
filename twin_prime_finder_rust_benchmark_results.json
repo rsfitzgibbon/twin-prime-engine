@@ -1,0 +1,62 @@
+{
+  "repeats": 7,
+  "workloads": [
+    {
+      "limit_n": 1000000,
+      "mode": "fast",
+      "python_best_seconds": 0.11059670000395272,
+      "rust_best_seconds": 0.0442750999936834,
+      "candidate_count": 13811,
+      "speedup_factor": 2.497943539816539,
+      "speedup_percent": 149.79435398165387,
+      "clears_12_percent_goal": true
+    },
+    {
+      "limit_n": 1000000,
+      "mode": "high_precision",
+      "python_best_seconds": 0.13753700000233948,
+      "rust_best_seconds": 0.03599110000504879,
+      "candidate_count": 9550,
+      "speedup_factor": 3.8214169609443984,
+      "speedup_percent": 282.14169609443985,
+      "clears_12_percent_goal": true
+    },
+    {
+      "limit_n": 1000000,
+      "mode": "exact_range",
+      "python_best_seconds": 0.17524660000344738,
+      "rust_best_seconds": 0.03289609999774257,
+      "candidate_count": 8168,
+      "speedup_factor": 5.327275878157999,
+      "speedup_percent": 432.7275878157999,
+      "clears_12_percent_goal": true
+    },
+    {
+      "limit_n": 1000000,
+      "mode": "high_precision",
+      "score": true,
+      "python_best_seconds": 0.2774764999994659,
+      "rust_best_seconds": 0.046866500000760425,
+      "candidate_count": 9550,
+      "speedup_factor": 5.920572263663037,
+      "speedup_percent": 492.0572263663037,
+      "clears_12_percent_goal": true
+    },
+    {
+      "limit_n": 1000000,
+      "mode": "high_precision",
+      "score": true,
+      "top_k": 4000,
+      "python_best_seconds": 0.27219009999680566,
+      "rust_best_seconds": 0.03252529999735998,
+      "candidate_count": 4000,
+      "speedup_factor": 8.368565394289949,
+      "speedup_percent": 736.8565394289949,
+      "clears_12_percent_goal": true
+    }
+  ],
+  "notes": [
+    "Rust timings include subprocess invocation and JSON parsing through the Python API",
+    "The goal threshold is a 12% speedup over the Python engine"
+  ]
+}
