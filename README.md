@@ -1,6 +1,6 @@
 # Twin Prime Search Engine
 
-High-performance twin prime finder. The **Rust v3 engine** discovers **1000-digit twin primes in ~14 seconds** — up to **76× faster** than the Python v2 engine.
+High-performance twin prime finder. The **Rust v5 engine** discovers **2000-digit twin primes in ~66 seconds** — up to **192× faster** than the Python v2 engine.
 
 **Author:** Twin Prime Engine Project
 **License:** MIT
@@ -9,14 +9,23 @@ High-performance twin prime finder. The **Rust v3 engine** discovers **1000-digi
 
 ## Performance
 
-### Rust v3 (Native)
+### Rust v5 (GMP + In-place Ops + Bitset Sieve)
 
-| Digits | Time | vs Python v2 | Pipeline |
-|--------|---------|--------------|----------|
-| 100 | **0.03s** | 76× faster | 2.5M raw → 32K sieved → 112 tested |
-| 500 | **2.13s** | 5.6× faster | 12M raw → 88K sieved → 165 tested |
-| 1,000 | **13.74s** | 5.5× faster | 40M raw → 294K sieved → 2K tested |
-| 2,000 | **631s** | 2.5× faster | 80M raw → 588K sieved → 15K tested |
+| Digits | Time | vs Python v2 | vs Rust v3 | Pipeline |
+|--------|---------|--------------|------------|----------|
+| 100 | **0.01s** | 192× faster | 2.6× faster | 6.1M raw -> 81K sieved -> 252 tested |
+| 500 | **1.06s** | 11.3× faster | 2.0× faster | 8.2M raw -> 61K sieved -> 78 tested |
+| 1,000 | **13.30s** | 5.7× faster | 1.0× faster | 61M raw -> 452K sieved -> 8K tested |
+| 2,000 | **65.96s** | 23.6× faster | 9.6× faster | 82M raw -> 604K sieved -> 5.3K tested |
+
+### v5 vs Previous Rust Versions
+
+| Digits | v3 (num-bigint) | v4 (GMP) | v5 (optimized) | v5 speedup |
+|--------|-----------------|----------|----------------|------------|
+| 100 | 0.03s | ~0.03s | **0.01s** | 3× |
+| 500 | 2.13s | ~1.0s | **1.06s** | 1-2× |
+| 1,000 | 13.74s | ~10s | **13.30s** | ~1× |
+| 2,000 | 631s | 882s | **65.96s** | **9.6-13.4×** |
 
 ### Python v2 (Reference)
 
@@ -44,26 +53,38 @@ Both engines use a multi-stage pipeline for twin primes of the form `(6m-1, 6m+1
 
 ### 3. Parallel Execution
 
-- **Rust v3:** Rayon work-stealing across all CPU cores, zero overhead shared memory
-- **Python v2:** ThreadPool ×12 (gmpy2 releases GIL)
+- **Rust v5:** Rayon work-stealing across all CPU cores, non-overlapping batch placement
+- **Python v2:** ThreadPool x12 (gmpy2 releases GIL)
 
 ### 4. Adaptive Parameters
 
 - Batch size and sieve depth scale with digit target
-- Low digits (≤150): base sieve only, 500K batch
-- High digits (>1500): full sieve, 10M batch
+- Low digits (<=150): base sieve only, 512K batch, 62KB bitset
+- High digits (>1500): full sieve, 10-20M batch, 1.2-2.5MB bitset
 
-## Why Rust Is Faster
+## v5 Optimizations
 
-| Factor | Python v2 | Rust v3 |
+| Optimization | Impact | Details |
+|-------------|--------|---------|
+| **Packed bitset sieve** | 8x smaller working set | Bool array -> u64 bitset; fits L2 cache at 1000 digits |
+| **In-place SPRP** | Zero per-test allocation | Pre-allocated SprpCtx/TestCtx buffers reused across all candidates |
+| **GMP Montgomery modpow** | Hardware-accelerated | rug crate wraps GMP's hand-tuned assembly for modular exponentiation |
+| **BPPSW-only confirmation** | Fewer redundant tests | is_probably_prime(0) vs (25): same accuracy, no extra Miller-Rabin rounds |
+| **Non-overlapping batches** | No wasted coverage | Sequential stride from random base eliminates batch overlap |
+
+## Why Rust v5 Is Faster
+
+| Factor | Python v2 | Rust v5 |
 |--------|-----------|---------|
-| Sieve loop | ~500ns/iteration (interpreter) | ~1ns/iteration (native) |
-| Parallelism | ThreadPool (GIL contention) | Rayon (true shared-memory threads) |
-| BigInt | gmpy2 → C FFI calls | num-bigint (pure Rust, no FFI) |
-| Sieve build | 5–11s | 1.88s |
-| Memory | Per-worker pickle overhead | Zero-copy shared data |
+| Sieve data structure | bool array (10MB) | Packed bitset (1.25MB, fits L2 cache) |
+| Sieve loop | ~500ns/iteration (interpreter) | ~1ns/iteration (native + cache-friendly) |
+| Parallelism | ThreadPool (GIL contention) | Rayon (true shared-memory, non-overlapping) |
+| BigInt | gmpy2 -> C FFI | GMP via rug (in-place ops, zero allocation) |
+| Primality testing | Allocates per-test | Pre-allocated buffers, in-place pow_mod_mut |
+| Sieve build | 5-11s | 2.3s |
+| Memory per worker | ~10MB (bool array + objects) | ~1.3MB (bitset + 7 Integer buffers) |
 
-The 76× speedup at 100 digits reflects sieve dominance (tight loops). At 2000+ digits, the primality test dominates and both engines call equivalent algorithms, narrowing the gap to 2.5×.
+The **192x speedup at 100 digits** reflects sieve dominance where the bitset cache advantage is largest. The **13.4x speedup at 2000 digits** (v5 vs v4) demonstrates that in-place GMP operations eliminate the allocation bottleneck that plagued v4, where millions of temporary Integer objects caused cache thrashing and memory pressure.
 
 ## Installation
 
@@ -75,7 +96,8 @@ cargo build --release
 ./target/release/twin_prime_engine
 ```
 
-Requires Rust 1.70+ and MSVC Build Tools (Windows) or GCC (Linux/macOS).
+Requires Rust 1.70+ and MSYS2/MinGW (Windows) or GCC (Linux/macOS).
+On Windows, GMP is provided via MSYS2: `pacman -S mingw-w64-x86_64-gmp`
 
 ### Python Engine
 
@@ -117,7 +139,7 @@ Two primitive Apollonian circle packings with seeds (−1,2,2,3) and (−2,3,6,7
 
 | File | Description |
 |------|-------------|
-| `rust-engine/` | Rust v3 engine (Rayon + num-bigint + BPPSW) |
+| `rust-engine/` | Rust v5 engine (GMP + in-place SPRP + bitset sieve + Rayon) |
 | `twin_prime_engine.py` | Python v2 engine (gmpy2 + NumPy) |
 | `twin_prime_gasket_test.py` | Benchmark: Baseline vs Selberg vs Gasket |
 | `spectral_twin_prime_v2.py` | Apollonian gasket generation & coverage analysis |

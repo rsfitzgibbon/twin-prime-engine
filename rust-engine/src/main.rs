@@ -1,22 +1,25 @@
-//! Twin Prime Search Engine v4 — GMP-accelerated Rust implementation
+//! Twin Prime Search Engine v5 — Optimized GMP-accelerated Rust implementation
+//!
+//! v5 optimizations over v4:
+//! - Packed bitset sieve (8× smaller working set → fits L2 cache, better locality)
+//! - In-place rug::Integer operations (zero allocation in primality testing hot path)
+//! - Reusable SprpCtx/TestCtx buffers per worker (no per-candidate malloc/free)
+//! - BPPSW-only final confirmation (is_probably_prime(0), no extra Miller-Rabin)
+//! - Non-overlapping sequential batches per round (no redundant coverage)
+//! - Adaptive batch sizing per digit target
 //!
 //! Architecture:
 //! 1. Sieve of Eratosthenes to 10^8 for prime table
-//! 2. Two-tier algebraic sieve: base (to 10^6) + extended (to 10^8)
+//! 2. Two-tier algebraic sieve on packed bitset: base (to 10^6) + extended (to 10^8)
 //!    Twin primes form (6m-1, 6m+1), sieve eliminates m where 6m±1 ≡ 0 (mod p)
 //! 3. SPRP(2) on p1, then p2 (short-circuit), then SPRP(3,5,7) on survivors
-//! 4. Lucas PRP confirmation (completing BPPSW) — no redundant SPRP(2)
+//! 4. BPPSW confirmation (Lucas PRP via GMP) — deterministic for all known composites
 //! 5. Rayon parallel iteration across batches and candidates
-//!
-//! Key optimizations over v3:
-//! - GMP (via rug) for all big-integer arithmetic: Montgomery modpow, Toom-Cook multiply
-//! - mpz_fdiv_ui for single-limb mod in sieve (no BigUint allocation)
-//! - Optimized test ordering: SPRP(2) p1→p2, then SPRP(3,5,7), then Lucas
-//! - GMP's native Jacobi symbol and primality testing
 
 use rand::Rng;
 use rayon::prelude::*;
 use rug::integer::IsPrime;
+use rug::Assign;
 use rug::Integer;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,16 +97,15 @@ impl SieveData {
     }
 }
 
-/// Run base sieve (primes to 10^6) on a batch starting at m_start.
-/// Uses GMP's mpz_fdiv_ui for fast single-limb mod of big integers.
-fn base_sieve(alive: &mut [bool], m_start: &Integer, sieve: &SieveData) {
-    let batch_size = alive.len();
+/// Run base sieve (primes to 10^6) on a packed bitset.
+/// Each bit in alive[] represents one candidate m value.
+fn base_sieve(alive: &mut [u64], batch_size: usize, m_start: &Integer, sieve: &SieveData) {
     for (idx, &p) in sieve.primes_small.iter().enumerate() {
         let inv6 = sieve.inv6_small[idx];
-        // GMP's fdiv_ui: single-limb mod, no allocation
         let m_mod_p = m_start.mod_u(p as u32) as u64;
         let p_us = p as usize;
 
+        // Offset where 6(m_start + r1) - 1 ≡ 0 (mod p)
         let r1 = if inv6 >= m_mod_p {
             (inv6 - m_mod_p) as usize
         } else {
@@ -111,10 +113,13 @@ fn base_sieve(alive: &mut [bool], m_start: &Integer, sieve: &SieveData) {
         };
         let mut j = r1;
         while j < batch_size {
-            unsafe { *alive.get_unchecked_mut(j) = false; }
+            unsafe {
+                *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
+            }
             j += p_us;
         }
 
+        // Offset where 6(m_start + r2) + 1 ≡ 0 (mod p)
         let complement = p - inv6;
         let r2 = if complement >= m_mod_p {
             (complement - m_mod_p) as usize
@@ -123,15 +128,21 @@ fn base_sieve(alive: &mut [bool], m_start: &Integer, sieve: &SieveData) {
         };
         let mut j = r2;
         while j < batch_size {
-            unsafe { *alive.get_unchecked_mut(j) = false; }
+            unsafe {
+                *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
+            }
             j += p_us;
         }
     }
 }
 
-/// Run extended sieve (primes 10^6 to 10^8) on a batch.
-fn extended_sieve(alive: &mut [bool], m_start: &Integer, sieve: &SieveData) {
-    let batch_size = alive.len();
+/// Run extended sieve (primes 10^6 to 10^8) on a packed bitset.
+fn extended_sieve(
+    alive: &mut [u64],
+    batch_size: usize,
+    m_start: &Integer,
+    sieve: &SieveData,
+) {
     for (idx, &p) in sieve.primes_ext.iter().enumerate() {
         let inv6 = sieve.inv6_ext[idx];
         let m_mod_p = m_start.mod_u(p as u32) as u64;
@@ -145,7 +156,9 @@ fn extended_sieve(alive: &mut [bool], m_start: &Integer, sieve: &SieveData) {
         if r1 < batch_size {
             let mut j = r1;
             while j < batch_size {
-                unsafe { *alive.get_unchecked_mut(j) = false; }
+                unsafe {
+                    *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
+                }
                 j += p_us;
             }
         }
@@ -159,89 +172,165 @@ fn extended_sieve(alive: &mut [bool], m_start: &Integer, sieve: &SieveData) {
         if r2 < batch_size {
             let mut j = r2;
             while j < batch_size {
-                unsafe { *alive.get_unchecked_mut(j) = false; }
+                unsafe {
+                    *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
+                }
                 j += p_us;
             }
         }
     }
 }
 
-/// SPRP (Strong Probable Prime) test using GMP's modpow (Montgomery reduction).
-fn is_sprp(n: &Integer, base: u32) -> bool {
-    if *n < 2 {
-        return false;
+/// Collect survivor indices from packed bitset using bit tricks.
+fn collect_survivors(alive: &[u64], batch_size: usize) -> Vec<u64> {
+    let mut result = Vec::new();
+    for (word_idx, &word) in alive.iter().enumerate() {
+        if word == 0 {
+            continue;
+        }
+        let base = (word_idx as u64) << 6;
+        let mut w = word;
+        while w != 0 {
+            let bit = w.trailing_zeros() as u64;
+            let idx = base + bit;
+            if idx < batch_size as u64 {
+                result.push(idx);
+            }
+            w &= w - 1; // clear lowest set bit
+        }
     }
-    let nm1 = Integer::from(n - 1);
+    result
+}
 
-    // Write n-1 = 2^r * d
-    let r = nm1.find_one(0).unwrap_or(0);
-    let d = Integer::from(&nm1 >> r);
+/// Pre-allocated buffers for SPRP testing — eliminates per-test allocations.
+struct SprpCtx {
+    nm1: Integer,
+    d: Integer,
+    x: Integer,
+    two: Integer,
+}
 
-    let base_int = Integer::from(base);
-    let mut x = base_int.pow_mod(&d, n).unwrap();
-
-    if x == 1 || x == nm1 {
-        return true;
+impl SprpCtx {
+    fn new() -> Self {
+        SprpCtx {
+            nm1: Integer::new(),
+            d: Integer::new(),
+            x: Integer::new(),
+            two: Integer::from(2),
+        }
     }
 
-    for _ in 0..r - 1 {
-        x = Integer::from(x.pow_mod_ref(&Integer::from(2), n).unwrap());
-        if x == nm1 {
+    /// Strong Probable Prime test using in-place GMP operations.
+    /// Zero allocation: all computation uses pre-allocated buffers.
+    fn is_sprp(&mut self, n: &Integer, base: u32) -> bool {
+        // nm1 = n - 1
+        self.nm1.assign(n);
+        self.nm1 -= 1;
+
+        // Write n-1 = 2^r * d
+        let r = self.nm1.find_one(0).unwrap_or(0);
+        self.d.assign(&self.nm1);
+        self.d >>= r;
+
+        // x = base^d mod n (in-place: assigns result to self.x)
+        self.x.assign(base);
+        self.x.pow_mod_mut(&self.d, n).unwrap();
+
+        if self.x == 1 || self.x == self.nm1 {
             return true;
         }
-        if x == 1 {
-            return false;
+
+        for _ in 0..r - 1 {
+            // x = x^2 mod n (in-place squaring)
+            self.x.pow_mod_mut(&self.two, n).unwrap();
+            if self.x == self.nm1 {
+                return true;
+            }
+            if self.x == 1 {
+                return false;
+            }
         }
+        false
     }
-    false
 }
 
-/// Test if m yields a twin prime pair (6m-1, 6m+1).
-/// Optimized test ordering: SPRP(2) both → SPRP(3,5,7) both → GMP full primality.
-fn test_candidate(m_val: u64, m_start: &Integer) -> Option<(Integer, Integer)> {
-    let m = Integer::from(m_start + m_val);
-    let p1 = Integer::from(&m * 6) - 1;
-
-    // Stage 1: SPRP(2) on p1 — cheapest filter, rejects ~50%
-    if !is_sprp(&p1, 2) {
-        return None;
-    }
-
-    let p2 = Integer::from(&p1 + 2);
-
-    // Stage 2: SPRP(2) on p2 — short-circuit: test both with base 2 first
-    if !is_sprp(&p2, 2) {
-        return None;
-    }
-
-    // Stage 3: SPRP(3,5,7) on p1 — further composite filter
-    for &base in &[3u32, 5, 7] {
-        if !is_sprp(&p1, base) {
-            return None;
-        }
-    }
-
-    // Stage 4: SPRP(3,5,7) on p2
-    for &base in &[3u32, 5, 7] {
-        if !is_sprp(&p2, base) {
-            return None;
-        }
-    }
-
-    // Stage 5: GMP full primality (BPPSW internally, no redundant SPRP(2))
-    // is_probably_prime with reps=25 runs GMP's internal BPPSW + extra Miller-Rabin
-    if p1.is_probably_prime(25) != IsPrime::No && p2.is_probably_prime(25) != IsPrime::No {
-        return Some((p1, p2));
-    }
-    None
+/// Per-worker context with pre-allocated buffers for all operations.
+/// Created once per Rayon task, reused across all candidates in the batch.
+struct TestCtx {
+    sprp: SprpCtx,
+    p1: Integer,
+    p2: Integer,
 }
 
+impl TestCtx {
+    fn new() -> Self {
+        TestCtx {
+            sprp: SprpCtx::new(),
+            p1: Integer::new(),
+            p2: Integer::new(),
+        }
+    }
+
+    /// Test if m yields a twin prime pair (6m-1, 6m+1).
+    /// Optimized ordering: SPRP(2) both -> SPRP(3,5,7) both -> BPPSW confirmation.
+    /// All arithmetic is in-place: zero heap allocation until a pair is found.
+    fn test_candidate(&mut self, m_val: u64, m_start: &Integer) -> Option<(Integer, Integer)> {
+        // p1 = 6*(m_start + m_val) - 1
+        self.p1.assign(m_start);
+        self.p1 += m_val;
+        self.p1 *= 6;
+        self.p1 -= 1;
+
+        // Stage 1: SPRP(2) on p1 — cheapest filter, rejects ~65% of sieve survivors
+        if !self.sprp.is_sprp(&self.p1, 2) {
+            return None;
+        }
+
+        // p2 = p1 + 2
+        self.p2.assign(&self.p1);
+        self.p2 += 2;
+
+        // Stage 2: SPRP(2) on p2 — short-circuit: test both with base 2 first
+        if !self.sprp.is_sprp(&self.p2, 2) {
+            return None;
+        }
+
+        // Stage 3: SPRP(3,5,7) on p1 — further composite filter
+        for &base in &[3u32, 5, 7] {
+            if !self.sprp.is_sprp(&self.p1, base) {
+                return None;
+            }
+        }
+
+        // Stage 4: SPRP(3,5,7) on p2
+        for &base in &[3u32, 5, 7] {
+            if !self.sprp.is_sprp(&self.p2, base) {
+                return None;
+            }
+        }
+
+        // Stage 5: BPPSW confirmation via GMP (is_probably_prime(0) = SPRP(2) + Lucas)
+        // No known BPPSW pseudoprimes exist; combined with our SPRP(2,3,5,7) pre-filter,
+        // the false positive probability is vanishingly small.
+        if self.p1.is_probably_prime(0) != IsPrime::No
+            && self.p2.is_probably_prime(0) != IsPrime::No
+        {
+            return Some((self.p1.clone(), self.p2.clone()));
+        }
+        None
+    }
+}
+
+/// Adaptive parameters: batch size and sieve mode per digit target.
+/// Larger batches amortize the per-prime mod_u cost in the sieve phase.
+/// All batch sizes are multiples of 64 for bitset alignment.
 fn get_params(target_digits: u32) -> (usize, bool) {
     match target_digits {
-        0..=150 => (500_000, false),
-        151..=500 => (2_000_000, true),
-        501..=1500 => (5_000_000, true),
-        _ => (10_000_000, true),
+        0..=150 => (512_000, false),       // 500K, base sieve only (sieve-dominated)
+        151..=500 => (2_048_000, true),     // 2M, full sieve
+        501..=1500 => (5_120_000, true),    // 5M, full sieve
+        1501..=3000 => (10_240_000, true),  // 10M, full sieve (balanced)
+        _ => (20_480_000, true),            // 20M, full sieve (testing-dominated)
     }
 }
 
@@ -268,6 +357,7 @@ fn search_twins(
     sieve: &SieveData,
 ) -> (SearchResult, Option<(Integer, Integer)>) {
     let (batch_size, use_extended) = get_params(target_digits);
+    let words = batch_size / 64;
 
     let m_low = {
         let mut x = Integer::from(Integer::u_pow_u(10, target_digits - 1));
@@ -281,13 +371,18 @@ fn search_twins(
     };
     let m_range = Integer::from(&m_high - &m_low) - batch_size as u64;
 
+    // Hardy-Littlewood expected twin prime trials for this digit count
     let ln_n = (target_digits as f64) * std::f64::consts::LN_10;
     let hl_raw = ln_n * ln_n / (2.0 * 0.6601618158);
 
     let sieve_mode = if use_extended { "full" } else { "base only" };
     println!(
-        "  Target: ~{} digits, HL trials: {:.0}, Batch: {}, Sieve: {}",
-        target_digits, hl_raw, batch_size, sieve_mode
+        "  Target: ~{} digits | HL est: {:.0} trials | Batch: {} | Sieve: {} | Bitset: {}KB",
+        target_digits,
+        hl_raw,
+        batch_size,
+        sieve_mode,
+        words * 8 / 1024
     );
 
     let t0 = Instant::now();
@@ -297,19 +392,22 @@ fn search_twins(
     let mut total_tested: u64 = 0;
     let mut batches: u32 = 0;
     let num_workers = num_cpus::get();
-
     let m_range_u64 = m_range.to_u64().unwrap_or(u64::MAX);
 
     while t0.elapsed().as_secs_f64() < max_seconds && !found_flag.load(Ordering::Relaxed) {
+        // Non-overlapping batch starts: random base, sequential stride
         let mut rng = rand::thread_rng();
+        let round_base = rng.gen_range(0u64..m_range_u64);
+        let stride = batch_size as u64;
         let batch_starts: Vec<Integer> = (0..num_workers)
-            .map(|_| {
-                let offset = rng.gen_range(0u64..m_range_u64);
+            .map(|i| {
+                let offset = (round_base + (i as u64) * stride) % m_range_u64;
                 Integer::from(&m_low + offset)
             })
             .collect();
 
         let flag = found_flag.clone();
+        let deadline = max_seconds;
         let results: Vec<_> = batch_starts
             .into_par_iter()
             .map(|m_start| {
@@ -317,28 +415,30 @@ fn search_twins(
                     return (0u64, 0u64, 0u64, None);
                 }
 
-                let mut alive = vec![true; batch_size];
-                base_sieve(&mut alive, &m_start, sieve);
+                // Sieve phase: packed bitset (8x smaller than bool array)
+                let mut alive = vec![u64::MAX; words];
+                base_sieve(&mut alive, batch_size, &m_start, sieve);
                 if use_extended {
-                    extended_sieve(&mut alive, &m_start, sieve);
+                    extended_sieve(&mut alive, batch_size, &m_start, sieve);
                 }
 
-                let survivors: Vec<u64> = alive
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, &a)| a)
-                    .map(|(i, _)| i as u64)
-                    .collect();
-
+                let survivors = collect_survivors(&alive, batch_size);
                 let n_surv = survivors.len() as u64;
+
+                // Test phase: zero-allocation in-place operations
+                let mut ctx = TestCtx::new();
                 let mut tested = 0u64;
 
                 for &off in &survivors {
                     if flag.load(Ordering::Relaxed) {
                         break;
                     }
+                    // Check time budget every 64 candidates (amortize syscall)
+                    if tested & 63 == 0 && t0.elapsed().as_secs_f64() > deadline {
+                        break;
+                    }
                     tested += 1;
-                    if let Some((p1, p2)) = test_candidate(off, &m_start) {
+                    if let Some((p1, p2)) = ctx.test_candidate(off, &m_start) {
                         flag.store(true, Ordering::Relaxed);
                         return (batch_size as u64, n_surv, tested, Some((p1, p2)));
                     }
@@ -383,9 +483,14 @@ fn search_twins(
         } else {
             0.0
         };
+        let surv_pct = if total_raw > 0 {
+            100.0 * total_surv as f64 / total_raw as f64
+        } else {
+            0.0
+        };
         println!(
-            "    [{:.1}s] {} raw -> {} sieved -> {} tested ({:.0}/s)",
-            el, total_raw, total_surv, total_tested, rate
+            "    [{:.1}s] {} raw -> {} sieved ({:.2}%) -> {} tested ({:.0}/s)",
+            el, total_raw, total_surv, surv_pct, total_tested, rate
         );
     }
 
@@ -407,9 +512,9 @@ fn search_twins(
 
 fn main() {
     let num_workers = num_cpus::get();
-    println!("Twin Prime Engine v4 (Rust + GMP)");
+    println!("Twin Prime Engine v5 (Rust + GMP, optimized)");
     println!(
-        "Rayon x{} | SPRP(2,3,5,7)+GMP BPPSW | Montgomery modpow | Toom-Cook multiply",
+        "Rayon x{} | In-place SPRP(2,3,5,7) + BPPSW | Bitset sieve | Montgomery modpow",
         num_workers
     );
     println!();
@@ -418,7 +523,7 @@ fn main() {
     let sieve = SieveData::build(100_000_000);
     let setup_time = t_pre.elapsed().as_secs_f64();
     println!(
-        "Sieve: {} primes to 10^6, {} to 10^8 ({:.2}s)",
+        "Sieve: {} base primes (to 10^6), {} extended (to 10^8) [{:.2}s]",
         sieve.primes_small.len(),
         sieve.primes_ext.len(),
         setup_time
@@ -433,18 +538,16 @@ fn main() {
         (5000, 3600.0),
     ];
 
-    // v2 Python baselines
-    let v2_times: Vec<(u32, f64)> =
-        vec![(100, 2.23), (500, 11.98), (1000, 75.28), (2000, 1554.0)];
-    // v3 Rust (num-bigint) baselines
-    let v3_times: Vec<(u32, f64)> =
-        vec![(100, 0.03), (500, 2.13), (1000, 13.74), (2000, 631.0)];
+    // Baselines for comparison
+    let v2_py: Vec<(u32, f64)> = vec![(100, 2.23), (500, 11.98), (1000, 75.28), (2000, 1554.0)];
+    let v3_rs: Vec<(u32, f64)> = vec![(100, 0.03), (500, 2.13), (1000, 13.74), (2000, 631.0)];
+    let v4_rs: Vec<(u32, f64)> = vec![(2000, 882.0)];
 
     let mut all_results: Vec<SearchResult> = Vec::new();
     let mut largest: Option<(Integer, Integer, SearchResult)> = None;
 
     for &(td, budget) in &targets {
-        println!("{}", "=".repeat(65));
+        println!("{}", "=".repeat(70));
         let (result, primes) = search_twins(td, budget, &sieve);
 
         if result.found {
@@ -453,19 +556,25 @@ fn main() {
                 println!("  ({}...{}, +2)", h, t);
             }
             if let Some(d) = result.p_digits {
-                println!("  {} digits", d);
+                println!("  {} actual digits", d);
             }
             println!(
                 "  Pipeline: {} raw -> {} sieved -> {} tested",
                 result.total_raw, result.total_surv, result.total_tested
             );
-            if let Some(&(_, v2t)) = v2_times.iter().find(|&&(d, _)| d == td) {
-                println!("  vs Python v2: {:.1}x faster", v2t / result.elapsed_secs);
+            if let Some(&(_, t)) = v2_py.iter().find(|&&(d, _)| d == td) {
+                println!("  vs Python v2: {:.1}x faster", t / result.elapsed_secs);
             }
-            if let Some(&(_, v3t)) = v3_times.iter().find(|&&(d, _)| d == td) {
+            if let Some(&(_, t)) = v3_rs.iter().find(|&&(d, _)| d == td) {
                 println!(
                     "  vs Rust v3 (num-bigint): {:.1}x faster",
-                    v3t / result.elapsed_secs
+                    t / result.elapsed_secs
+                );
+            }
+            if let Some(&(_, t)) = v4_rs.iter().find(|&&(d, _)| d == td) {
+                println!(
+                    "  vs v4 (GMP baseline): {:.1}x faster",
+                    t / result.elapsed_secs
                 );
             }
             if let Some((p1, p2)) = primes {
@@ -489,9 +598,9 @@ fn main() {
 
     if let Some((ref p1, _, ref lr)) = largest {
         println!();
-        println!("{}", "=".repeat(65));
+        println!("{}", "=".repeat(70));
         println!("LARGEST TWIN PRIME FOUND");
-        println!("{}", "=".repeat(65));
+        println!("{}", "=".repeat(70));
         let sp = p1.to_string();
         println!("  Digits: {}", sp.len());
         println!("  p = {}", &sp[..70.min(sp.len())]);
@@ -504,7 +613,7 @@ fn main() {
     }
 
     let output = serde_json::json!({
-        "version": "v4-rust-gmp",
+        "version": "v5-rust-gmp-optimized",
         "workers": num_workers,
         "results": all_results,
     });
@@ -512,5 +621,5 @@ fn main() {
         std::fs::write("twin_prime_engine_results.json", json).ok();
     }
     println!();
-    println!("Saved to twin_prime_engine_results.json");
+    println!("Results saved to twin_prime_engine_results.json");
 }
