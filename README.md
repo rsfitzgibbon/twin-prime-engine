@@ -1,6 +1,6 @@
-# Twin Prime Search Engine v2
+# Twin Prime Search Engine
 
-High-performance multi-threaded twin prime finder. Discovers **1000-digit twin primes in ~75 seconds**.
+High-performance twin prime finder. The **Rust v3 engine** discovers **1000-digit twin primes in ~14 seconds** — up to **76× faster** than the Python v2 engine.
 
 **Author:** Twin Prime Engine Project
 **License:** MIT
@@ -9,6 +9,17 @@ High-performance multi-threaded twin prime finder. Discovers **1000-digit twin p
 
 ## Performance
 
+### Rust v3 (Native)
+
+| Digits | Time | vs Python v2 | Pipeline |
+|--------|---------|--------------|----------|
+| 100 | **0.03s** | 76× faster | 2.5M raw → 32K sieved → 112 tested |
+| 500 | **2.13s** | 5.6× faster | 12M raw → 88K sieved → 165 tested |
+| 1,000 | **13.74s** | 5.5× faster | 40M raw → 294K sieved → 2K tested |
+| 2,000 | **631s** | 2.5× faster | 80M raw → 588K sieved → 15K tested |
+
+### Python v2 (Reference)
+
 | Digits | Time | Sieved Candidates |
 |--------|---------|-------------------|
 | 100 | 2.23s | 36,817 |
@@ -16,27 +27,64 @@ High-performance multi-threaded twin prime finder. Discovers **1000-digit twin p
 | 1,000 | 75.28s | 36,813 |
 | 2,000 | 1,554s | 36,880 |
 
-## How It Works
+## Architecture
 
-The engine uses a multi-stage pipeline optimized for large twin primes of the form `(6m-1, 6m+1)`:
+Both engines use a multi-stage pipeline for twin primes of the form `(6m-1, 6m+1)`:
 
-### 1. Two-Tier Sieve (10^8 primes)
+### 1. Two-Tier Algebraic Sieve (10^8 primes)
 
 - **Base sieve** (primes to 10^6): Per-prime loop eliminates candidates where `6m ± 1 ≡ 0 (mod p)`
-- **Extended sieve** (primes 10^6 to 10^8): Vectorized NumPy elimination
-- Uses `gmpy2.f_mod()` for 2–4× faster big-integer modular reduction at 1000+ digits
+- **Extended sieve** (primes 10^6 to 10^8): Eliminates remaining composites
 - Survival rate: ~1.26% of candidates pass the sieve
 
-### 2. Multi-Threaded Primality Testing
+### 2. Multi-Stage Primality Testing
 
-- 12-thread `ThreadPool` (gmpy2 releases the GIL for true parallelism)
-- **SPRP base-2** on `p = 6m - 1` first — rejects ~50% of sieve survivors
-- Only survivors get `p + 2` tested
-- **BPPSW** confirmation on both primes for final verification
+- **Multi-base SPRP** (bases 2, 3, 5, 7) — fast composite filter, eliminates ~99.999% of remaining candidates
+- **BPPSW confirmation** (SPRP(2) + Lucas test) — deterministic for all known composites
 
-### 3. Adaptive Batching
+### 3. Parallel Execution
 
-Batch size scales automatically with digit target for optimal memory/throughput balance.
+- **Rust v3:** Rayon work-stealing across all CPU cores, zero overhead shared memory
+- **Python v2:** ThreadPool ×12 (gmpy2 releases GIL)
+
+### 4. Adaptive Parameters
+
+- Batch size and sieve depth scale with digit target
+- Low digits (≤150): base sieve only, 500K batch
+- High digits (>1500): full sieve, 10M batch
+
+## Why Rust Is Faster
+
+| Factor | Python v2 | Rust v3 |
+|--------|-----------|---------|
+| Sieve loop | ~500ns/iteration (interpreter) | ~1ns/iteration (native) |
+| Parallelism | ThreadPool (GIL contention) | Rayon (true shared-memory threads) |
+| BigInt | gmpy2 → C FFI calls | num-bigint (pure Rust, no FFI) |
+| Sieve build | 5–11s | 1.88s |
+| Memory | Per-worker pickle overhead | Zero-copy shared data |
+
+The 76× speedup at 100 digits reflects sieve dominance (tight loops). At 2000+ digits, the primality test dominates and both engines call equivalent algorithms, narrowing the gap to 2.5×.
+
+## Installation
+
+### Rust Engine (Recommended)
+
+```bash
+cd rust-engine
+cargo build --release
+./target/release/twin_prime_engine
+```
+
+Requires Rust 1.70+ and MSVC Build Tools (Windows) or GCC (Linux/macOS).
+
+### Python Engine
+
+```bash
+pip install gmpy2 numpy
+python twin_prime_engine.py
+```
+
+Requires Python 3.10+, gmpy2, NumPy.
 
 ## Key Insight: Selberg Integration
 
@@ -45,52 +93,12 @@ The companion benchmark (`twin_prime_gasket_test.py`) tested three strategies:
 | Strategy | Approach | Result |
 |----------|----------|--------|
 | **Baseline** | Sieve 5×10^7 + parallel SPRP | Reference timing |
-| **Selberg-scored** | +200 extra primes scoring | 15× fewer SPRP tests, but Python scoring overhead negates benefit |
+| **Selberg-scored** | +200 extra primes scoring | 15× fewer SPRP tests, but scoring overhead negates benefit |
 | **Gasket-aligned** | Residue filter mod 2520 | Covers 2520/2520 = 100% (universal covering, no-op) |
 
-**Solution:** Integrate Selberg's extra trial division directly INTO the sieve (extending from 5×10^7 to 10^8). This captures the same benefit with zero per-candidate overhead, yielding a **2.3× speedup** at 1000 digits vs the benchmark baseline.
-
-## Installation
-
-```bash
-pip install gmpy2 numpy
-```
-
-### System Requirements
-
-- Python 3.10+
-- [gmpy2](https://pypi.org/project/gmpy2/) (GMP bindings for fast big-integer arithmetic)
-- NumPy
-- Multi-core CPU recommended (engine uses 12 threads by default)
-
-## Usage
-
-```bash
-# Run the full search (100 → 5000 digits)
-python twin_prime_engine.py
-
-# Output: finds twin primes at each digit target, saves results to twin_prime_engine_results.json
-```
-
-### Configuration
-
-Edit the `targets` list in `main()` to adjust digit targets and time budgets:
-
-```python
-targets = [
-    (100, 30),    # (digits, max_seconds)
-    (500, 60),
-    (1000, 300),
-    (2000, 900),
-    (5000, 3600),
-]
-```
-
-Adjust `NUM_WORKERS` at the top of the file to match your CPU core count.
+**Solution:** Integrate Selberg's extra trial division directly INTO the sieve (extending from 5×10^7 to 10^8). This captures the same benefit with zero per-candidate overhead.
 
 ## The Gapless Gasket
-
-This repository also includes the research that informed the engine's design:
 
 **"The Gapless Gasket: Universal Residue Coverage via Apollonian Packing Pairs and Bridge Complements"** — Twin Prime Engine Project, March 2026
 
@@ -105,21 +113,12 @@ Two primitive Apollonian circle packings with seeds (−1,2,2,3) and (−2,3,6,7
 | 100,000 | 1,224 | 1,224 | 100% |
 | 500,000 | 4,565 | 4,565 | 100% |
 
-### Residue Class Complementarity (mod 24)
-
-| Component | Prime Classes | Twin Pairs |
-|-----------|--------------|------------|
-| Gasket A | {11, 23} | None internally |
-| Gasket B | {7, 19} | None internally |
-| Union A∪B | {7, 11, 19, 23} | None internally |
-| Bridge | {1, 5, 13, 17} | Completes all |
-| **Combined** | **All 8 classes** | **All 4 pairs** |
-
 ## Files
 
 | File | Description |
 |------|-------------|
-| `twin_prime_engine.py` | Main search engine (v2) |
+| `rust-engine/` | Rust v3 engine (Rayon + num-bigint + BPPSW) |
+| `twin_prime_engine.py` | Python v2 engine (gmpy2 + NumPy) |
 | `twin_prime_gasket_test.py` | Benchmark: Baseline vs Selberg vs Gasket |
 | `spectral_twin_prime_v2.py` | Apollonian gasket generation & coverage analysis |
 | `paper/gapless_gasket.tex` | Full LaTeX research paper |
