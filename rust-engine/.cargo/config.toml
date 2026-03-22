@@ -1,2 +1,6 @@
-[target.x86_64-pc-windows-msvc]
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:/msys64/mingw64/bin/gcc.exe"
 rustflags = ["-C", "target-cpu=native"]
