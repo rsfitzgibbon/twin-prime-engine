@@ -174,6 +174,31 @@ The Rust runner adds exact validation, continuous checkpointed search, and
 continuous survivor export for external large-PRP backends. That export mode is
 the practical route for million-digit-scale work.
 
+### OpenPFGW Bridge
+
+For large fixed-`n` runs, the recommended path is now:
+
+1. run `fixed_n_campaign.exe` with `--backend compact_export`
+2. add `--post-sieve-limit` to cut survivors further with an exact second-stage sieve
+3. feed the compact batches into `openpfgw_batch_runner.py`
+
+Example:
+
+```bash
+fixed_n_campaign.exe --n 1288907 --backend compact_export --export-dir campaign_388k_exact_post200k --k-start 3 --k-batch-size 4096 --sieve-limit 50000 --post-sieve-limit 200000 --max-batches 4 --json-out campaign_388k_exact_post200k_summary.json
+python openpfgw_batch_runner.py --compact-dir campaign_388k_exact_post200k --output-dir openpfgw_jobs_388k --prepare-only --json-out openpfgw_jobs_388k_summary.json
+```
+
+This reconstructs OpenPFGW-oriented `plus.abcd`, `minus.abcd`, `plus.txt`, and
+`minus.txt` files from the compact survivor batches. If a worker has `pfgw.exe`
+installed, the same bridge script can invoke it directly.
+
+For a persistent worker, use:
+
+```bash
+python openpfgw_worker.py --compact-dir campaign_388k_exact_post200k --output-dir openpfgw_jobs_388k --pfgw-exe C:\path\to\pfgw64.exe --state-file worker_state.json --result-log worker_results.jsonl --poll-seconds 30
+```
+
 ## Key Insight: Selberg Integration
 
 The companion benchmark (`twin_prime_gasket_test.py`) tested three strategies:

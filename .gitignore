@@ -6,3 +6,13 @@ rust-engine/target/
 rust-engine/target_k2n/
 rust-engine/twin_prime_engine_results.json
 rust_twin_prime_finder/target/
+campaign_*/
+campaign_*_summary.json
+campaign_*_events.jsonl
+openpfgw_jobs_*/
+openpfgw_jobs*_summary.json
+pfgw_*/
+pfgw_*_summary.json
+pfgw.ini
+pfgw.log
+pfgw-prime.log
