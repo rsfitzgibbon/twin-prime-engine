@@ -22,7 +22,18 @@
   - Hardware popcount for survivor counting
 - Sieve depth is now adaptive: base-only for ≤150d, extended for 151-1500d, deep for ≥1501d
 
-**Benchmarks:** *(pending — benchmark running)*
+**Benchmarks (12-core Rayon, Windows 11):**
+
+| Digits | Time | Survivors | Rate | vs Python v2 | vs Rust v3 |
+|--------|------|-----------|------|-------------|------------|
+| 100 | 0.01s | 19,982 | - | 204x | 2.7x |
+| 500 | 1.07s | 30,529 | - | 11.2x | 2.0x |
+| 1,000 | 11.07s | 263,228 | 0.73% | 6.8x | 1.2x |
+| 2,000 | 142.53s | 349,780 | **0.68%** | 10.9x | 4.4x |
+
+Deep sieve at 2000d: survival rate 0.68% (vs v5's 0.74% — 8% fewer survivors).
+Sieve build: 2.90s (vs v5's 4.48s with u64 — 35% faster with u32 cache).
+Prime cache: 84.5 MB (vs ~169 MB with u64 — 50% smaller).
 
 ---
 

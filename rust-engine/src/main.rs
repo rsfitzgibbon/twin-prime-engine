@@ -3,6 +3,7 @@
 //! v5.1 optimizations over v5:
 //! - Bitset Eratosthenes (8× less memory for prime generation → enables deeper sieve)
 //! - Three-tier sieve: base (10^6) + extended (10^8) + deep (2×10^8) for high digits
+//! - Compact u32 prime/inverse tables (84.5 MB cache vs ~169 MB with u64)
 //! - Inline survivor testing: iterate bitset directly, no Vec<u64> allocation
 //! - Hardware popcount for survivor counting
 //!
