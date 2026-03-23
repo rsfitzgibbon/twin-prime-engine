@@ -82,8 +82,8 @@ Best operational picture:
 ## Useful commands
 
 ```powershell
-python Newtheory\twin_prime_finder.py --limit 1000000 --mode high_precision --score --preview 20
-python Newtheory\twin_prime_finder.py --limit 1000000 --mode high_precision --score --top-k 4000 --csv-out Newtheory\top4000_scored.csv
-python Newtheory\twin_prime_finder.py --benchmark --benchmark-limits 100000 500000 1000000
-python Newtheory\twin_prime_finder.py --benchmark --benchmark-limits 1000000 --benchmark-modes high_precision --score --top-k 4000
+python twin_prime_finder.py --limit 1000000 --mode high_precision --score --preview 20
+python twin_prime_finder.py --limit 1000000 --mode high_precision --score --top-k 4000 --csv-out top4000_scored.csv
+python twin_prime_finder.py --benchmark --benchmark-limits 100000 500000 1000000
+python twin_prime_finder.py --benchmark --benchmark-limits 1000000 --benchmark-modes high_precision --score --top-k 4000
 ```

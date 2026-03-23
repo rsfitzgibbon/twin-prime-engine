@@ -1,7 +1,8 @@
 __pycache__/
 *.pyc
 *.pyo
+k2n_exports/
 rust-engine/target/
+rust-engine/target_k2n/
 rust-engine/twin_prime_engine_results.json
 rust_twin_prime_finder/target/
-

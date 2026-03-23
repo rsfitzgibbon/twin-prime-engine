@@ -1,0 +1,17 @@
+{
+  "worker": "resident_rust_volunteer_worker",
+  "work_units": 1,
+  "sieve_limit": 1000000,
+  "prime_cache_mb": 0.598876953125,
+  "worker_setup_seconds": 0.0115325,
+  "results": [
+    {
+      "job_id": "tp-19d-demo",
+      "result_path": "rust_results/tp-19d-demo.result.json",
+      "survivors": 12,
+      "tested": 12,
+      "found_count": 4,
+      "elapsed_seconds": 0.0016412
+    }
+  ]
+}

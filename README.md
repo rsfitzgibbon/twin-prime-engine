@@ -1,8 +1,7 @@
 # Twin Prime Search Engine
 
-High-performance twin prime finder. The **Rust v5.1 engine** discovers **2000-digit twin primes in ~143 seconds** — up to **204× faster** than the Python v2 engine.
+High-performance twin prime finder. The **Rust v5.2 engine** discovers **1000-digit twin primes in ~2 seconds** and **2000-digit twin primes in ~153 seconds** — up to **339× faster** than the Python v2 engine.
 
-**Author:** Twin Prime Engine Project
 **License:** MIT
 
 ---
@@ -20,7 +19,7 @@ Use this repo for:
 
 The active experimental branch lives at:
 
-- `Newtheory`
+- `Newtheory` (separate local research branch)
 
 That branch owns exploratory theory work and prototypes until they are promoted here.
 
@@ -28,25 +27,25 @@ That branch owns exploratory theory work and prototypes until they are promoted 
 
 ## Performance
 
-### Rust v5.1 (GMP + 3-Tier Sieve + u32 Compact Cache)
+### Rust v5.2 (GMP + 3-Tier Sieve + Precomputed Mod)
 
 | Digits | Time | vs Python v2 | vs Rust v3 | Pipeline |
 |--------|---------|--------------|------------|----------|
-| 100 | **0.01s** | 204× faster | 2.7× faster | 1.5M raw -> 20K sieved -> 89 tested |
-| 500 | **1.07s** | 11.2× faster | 2.0× faster | 4.1M raw -> 31K sieved -> 117 tested |
-| 1,000 | **11.07s** | 6.8× faster | 1.2× faster | 36M raw -> 263K sieved -> 3.8K tested |
-| 2,000 | **142.53s** | 10.9× faster | 4.4× faster | 51M raw -> 350K sieved -> 7.2K tested |
+| 100 | **0.01s** | 339× faster | 4.6× faster | 3.6M raw -> 47K sieved -> 176 tested |
+| 500 | **0.30s** | 40× faster | 7.1× faster | 14.3M raw -> 106K sieved -> 608 tested |
+| 1,000 | **2.09s** | 36× faster | 6.6× faster | 25.6M raw -> 189K sieved -> 552 tested |
+| 2,000 | **~153s** | 10× faster | 4.1× faster | 10.2M raw -> 70K sieved -> 1.6K tested |
 
-**v5.1 improvements over v5:** 3-tier sieve (deep tier to 2×10^8), u32 compact cache (84.5 MB vs ~169 MB), inline survivor testing, bitset Eratosthenes. Deep sieve reduces 2000d survival rate from 0.74% to 0.68%.
+**v5.2 improvements over v5.1:** Precomputed `m_low mod p` for all 11M sieve primes eliminates GMP `mod_u` from the sieve hot path. Per-batch sieve uses only u64 arithmetic. **3.6× faster at 500d, 5.3× faster at 1000d.** At 2000d, SPRP testing dominates so sieve improvements have diminishing returns.
 
-### v5.1 vs Previous Rust Versions
+### v5.2 vs Previous Rust Versions
 
-| Digits | v3 (num-bigint) | v4 (GMP) | v5.1 (optimized) | v5.1 speedup |
+| Digits | v3 (num-bigint) | v4 (GMP) | v5.2 (optimized) | v5.2 speedup |
 |--------|-----------------|----------|------------------|--------------|
-| 100 | 0.03s | ~0.03s | **0.01s** | 3× |
-| 500 | 2.13s | ~1.0s | **1.07s** | 1-2× |
-| 1,000 | 13.74s | ~10s | **11.07s** | ~1× |
-| 2,000 | 631s | 882s | **142.53s** | **4.4-6.2×** |
+| 100 | 0.03s | ~0.03s | **0.01s** | 3-5× |
+| 500 | 2.13s | ~1.0s | **0.30s** | **3-7×** |
+| 1,000 | 13.74s | ~10s | **2.09s** | **5-7×** |
+| 2,000 | 631s | 882s | **~153s** | **4.1-5.8×** |
 
 ### Python v2 (Reference)
 
@@ -75,7 +74,7 @@ Both engines use a multi-stage pipeline for twin primes of the form `(6m-1, 6m+1
 
 ### 3. Parallel Execution
 
-- **Rust v5.1:** Rayon work-stealing across all CPU cores, non-overlapping batch placement
+- **Rust v5.2:** Rayon work-stealing across all CPU cores, non-overlapping batch placement
 - **Python v2:** ThreadPool x12 (gmpy2 releases GIL)
 
 ### 4. Adaptive Parameters
@@ -84,10 +83,11 @@ Both engines use a multi-stage pipeline for twin primes of the form `(6m-1, 6m+1
 - Low digits (<=150): base sieve only, 512K batch, 62KB bitset
 - High digits (>1500): full sieve, 10-20M batch, 1.2-2.5MB bitset
 
-## v5.1 Optimizations
+## v5.2 Optimizations
 
 | Optimization | Impact | Details |
 |-------------|--------|---------|
+| **Precomputed mod_u** | **3.6-5.3× at 500-1000d** | One-time GMP `mod_u` per search; per-batch sieve uses u64 arithmetic only |
 | **Packed bitset sieve** | 8x smaller working set | Bool array -> u64 bitset; fits L2 cache at 1000 digits |
 | **In-place SPRP** | Zero per-test allocation | Pre-allocated SprpCtx/TestCtx buffers reused across all candidates |
 | **GMP Montgomery modpow** | Hardware-accelerated | rug crate wraps GMP's hand-tuned assembly for modular exponentiation |
@@ -97,11 +97,12 @@ Both engines use a multi-stage pipeline for twin primes of the form `(6m-1, 6m+1
 | **u32 compact cache** | 50% less cache memory | 84.5 MB vs ~169 MB; sieve build 35% faster (2.9s vs 4.5s) |
 | **Inline survivor testing** | Zero Vec allocation | Iterate bitset directly with bit tricks + hardware popcount |
 
-## Why Rust v5.1 Is Faster
+## Why Rust v5.2 Is Faster
 
-| Factor | Python v2 | Rust v5.1 |
+| Factor | Python v2 | Rust v5.2 |
 |--------|-----------|-----------|
 | Sieve data structure | bool array (10MB) | Packed bitset (1.25MB, fits L2 cache) |
+| Sieve hot path | GMP mod_u per batch per prime | Precomputed mod + u64 arithmetic only |
 | Sieve depth | ~5×10^7 primes | 2×10^8 primes (3 tiers, adaptive) |
 | Sieve loop | ~500ns/iteration (interpreter) | ~1ns/iteration (native + cache-friendly) |
 | Parallelism | ThreadPool (GIL contention) | Rayon (true shared-memory, non-overlapping) |
@@ -111,7 +112,7 @@ Both engines use a multi-stage pipeline for twin primes of the form `(6m-1, 6m+1
 | Prime cache | N/A | 84.5 MB (u32 compact tables) |
 | Memory per worker | ~10MB (bool array + objects) | ~1.3MB (bitset + 7 Integer buffers) |
 
-The **204x speedup at 100 digits** reflects sieve dominance where the bitset cache advantage is largest. The **6.2x speedup at 2000 digits** (v5.1 vs v4) demonstrates that in-place GMP operations eliminate the allocation bottleneck that plagued v4, where millions of temporary Integer objects caused cache thrashing and memory pressure.
+The **339x speedup at 100 digits** reflects sieve dominance where the bitset cache advantage is largest. The **5.3x speedup at 1000 digits** (v5.2 vs v5.1) demonstrates that eliminating GMP `mod_u` from the sieve hot path removes the last remaining per-batch overhead. At 2000+ digits, SPRP modpow cost dominates — GPU acceleration (CGBN) is the path to the next breakthrough.
 
 ## Installation
 
@@ -159,6 +160,20 @@ not the large-digit search engine pipeline above. The promoted Rust finder now
 covers hard-mask generation, soft rerank, and sieve-score ranking; only geometry
 annotations remain Python-only.
 
+### Fixed-n k-Space Search
+
+The repo also includes a fixed-`n` twin-prime search path for pairs of the form
+`k*2^n +/- 1`, with `n` fixed and `k` varying.
+
+```bash
+python twin_prime_k2n_hunter.py --n 1000 --k-start 3 --k-batch-size 10000 --sieve-limit 50000 --max-seconds 10
+fixed_n_k_search.exe --n 1000 --k-start 3 --k-batch-size 10000 --sieve-limit 50000 --max-seconds 10
+```
+
+The Rust runner adds exact validation, continuous checkpointed search, and
+continuous survivor export for external large-PRP backends. That export mode is
+the practical route for million-digit-scale work.
+
 ## Key Insight: Selberg Integration
 
 The companion benchmark (`twin_prime_gasket_test.py`) tested three strategies:
@@ -173,7 +188,7 @@ The companion benchmark (`twin_prime_gasket_test.py`) tested three strategies:
 
 ## The Gapless Gasket
 
-**"The Gapless Gasket: Universal Residue Coverage via Apollonian Packing Pairs and Bridge Complements"** — Twin Prime Engine Project, March 2026
+**"The Gapless Gasket: Universal Residue Coverage via Apollonian Packing Pairs and Bridge Complements"** — March 2026
 
 Two primitive Apollonian circle packings with seeds (−1,2,2,3) and (−2,3,6,7), combined with a bidirectional bridge construction, produce a set covering **all 2520 residue classes modulo 2520**. Every twin-prime pair (p, p+2) up to N=500,000 is represented — **4,565/4,565 pairs, zero exceptions**.
 
@@ -190,12 +205,14 @@ Two primitive Apollonian circle packings with seeds (−1,2,2,3) and (−2,3,6,7
 
 | File | Description |
 |------|-------------|
-| `rust-engine/` | Rust v5.1 engine (GMP + 3-tier sieve + u32 cache + in-place SPRP + Rayon) |
+| `rust-engine/` | Rust v5.2 engine (GMP + 3-tier sieve + precomputed mod + in-place SPRP + Rayon) |
 | `twin_prime_engine.py` | Python v2 engine (gmpy2 + NumPy) |
 | `twin_prime_gasket_test.py` | Benchmark: Baseline vs Selberg vs Gasket |
 | `spectral_twin_prime_v2.py` | Apollonian gasket generation & coverage analysis |
 | `twin_prime_finder.py` | Practical finite-range corridor + arithmetic finder |
 | `rust_twin_prime_finder/` | Rust acceleration for the practical finder path |
+| `twin_prime_k2n_hunter.py` | Python fixed-`n` k-space twin-prime hunter |
+| `rust-engine/src/bin/fixed_n_k_search.rs` | Rust fixed-`n` k-space search, export, and checkpoint runner |
 | `twin_prime_finder_rust_benchmark.py` | Python-vs-Rust benchmark harness for the finder |
 | `paper/gapless_gasket.tex` | Full LaTeX research paper |
 | `paper/supplementary_data.json` | All numerical evidence (JSON) |
@@ -213,7 +230,7 @@ Two primitive Apollonian circle packings with seeds (−1,2,2,3) and (−2,3,6,7
 ```bibtex
 @article{fitzgibbon2026gapless,
   title={The Gapless Gasket: Universal Residue Coverage via Apollonian Packing Pairs and Bridge Complements},
-  author={Twin Prime Engine Project},
+  author={{Twin Prime Engine Project}},
   year={2026}
 }
 ```

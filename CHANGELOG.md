@@ -1,7 +1,36 @@
 # Twin Prime Engine — Development Log
 
-**Author:** Twin Prime Engine Project
 **Repository:** twin-prime-engine
+
+---
+
+## v5.2.0 — 2026-03-22
+
+### Precomputed mod_u — eliminates GMP from sieve hot path
+
+**Key changes:**
+- Precompute `m_low mod p` for all 11M sieve primes once per search (one-time GMP `mod_u`)
+- Per-batch sieve uses only u64 arithmetic: `((m_low_mod_p + offset % p) % p)`
+- Extracted `sieve_prime()` as `#[inline(always)]` helper shared by all three tiers
+- Sieve functions now take `offset: u64` + `&PrecomputedMods` instead of calling GMP per batch
+- Added fixed-`n` `k*2^n +/- 1` search tooling with Python prototype and Rust runner
+- Added continuous checkpointed search and continuous survivor export for large external PRP backends
+
+**Impact:** Eliminates ~11M GMP `mod_u` calls per batch. At 500-1000 digits where sieve
+overhead was a significant fraction of round time, this yields 3.6-5.3x speedup.
+At 2000+ digits, SPRP testing dominates so sieve improvements have diminishing returns.
+
+**Benchmarks (12-core Rayon, Windows 11):**
+
+| Digits | Time | vs v5.1 | vs Python v2 | vs Rust v3 | Pipeline |
+|--------|------|---------|-------------|------------|----------|
+| 100 | **0.01s** | ~1x | 339x | 4.6x | 3.6M raw -> 47K sieved -> 176 tested |
+| 500 | **0.30s** | **3.6x** | 40x | 7.1x | 14.3M raw -> 106K sieved -> 608 tested |
+| 1,000 | **2.09s** | **5.3x** | 36x | 6.6x | 25.6M raw -> 189K sieved -> 552 tested |
+| 2,000 | **~153s** | ~1x | 10x | 4.1x | 10.2M raw -> 70K sieved -> 1.6K tested |
+
+Precompute overhead: 0.29s (100d), 1.08s (500d), 2.10s (1000d), 4.12s (2000d) — amortized
+across all rounds, pays for itself many times over at mid-digit counts.
 
 ---
 
@@ -128,28 +157,23 @@ eliminated this entirely.
 
 ## Next Steps — Optimization Roadmap
 
-### Priority 1: Mod-30 Wheel Pre-filter (v5.1)
-- **Impact:** ~40% fewer sieve iterations
-- **Approach:** Skip m values where m mod 5 in {1, 4} (6m-1 or 6m+1 divisible by 5)
-- **Difficulty:** Low — compress bitset to only valid m positions
-
-### Priority 2: GPU SPRP via CGBN (v6)
+### Priority 1: GPU SPRP via CGBN (v6)
 - **Impact:** 12-20x throughput at 2000+ digits
 - **Approach:** Batch upload survivor p1/p2 values to GPU, run SPRP(2) on all simultaneously
 - **Requirements:** NVIDIA GPU + CUDA toolkit + cudarc crate
 - **Architecture:** Double-buffered pipeline — GPU tests batch N while CPU prepares batch N+1
 
-### Priority 3: GPU Sieve Marking via wgpu (v6)
+### Priority 2: GPU Sieve Marking via wgpu (v6)
 - **Impact:** 10-50x on sieve marking phase
 - **Approach:** CPU computes mod_u offsets, GPU kernel marks bitset with atomic ops
 - **Requirements:** Any GPU (cross-platform via WebGPU)
 
-### Priority 4: Deeper Sieve for High Digits (v5.2)
+### Priority 3: Deeper Sieve for High Digits (v5.3)
 - **Impact:** Fewer survivors at 5000+ digits (where SPRP dominates)
 - **Approach:** Streaming sieve to 10^9 (50M additional primes) for targets > 3000 digits
 - **Trade-off:** 26s extra sieve time per batch but saves thousands of seconds in testing
 
-### Priority 5: Primorial 30030 Wheel (v6+)
+### Priority 4: Primorial 30030 Wheel (v6+)
 - **Impact:** ~90% candidate reduction
 - **Approach:** Full SSoZ-style wheel with 114 twin-eligible positions per cycle of 2310
 - **Difficulty:** High — requires restructuring sieve inner loops

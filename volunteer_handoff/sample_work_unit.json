@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "job_id": "tp-19d-demo",
+  "target_digits": 19,
+  "m_start": "166666666666666666",
+  "batch_size": 1000,
+  "sieve_depth": "base",
+  "sieve_limit": 1000000,
+  "created_utc": "2026-03-22T00:00:00+00:00"
+}

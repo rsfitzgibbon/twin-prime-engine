@@ -1,9 +1,10 @@
-//! Twin Prime Search Engine v5.1 — Optimized GMP-accelerated Rust implementation
+//! Twin Prime Search Engine v5.2 — Optimized GMP-accelerated Rust implementation
 //!
-//! v5.1 optimizations over v5:
+//! v5.2 optimizations over v5:
 //! - Bitset Eratosthenes (8× less memory for prime generation → enables deeper sieve)
 //! - Three-tier sieve: base (10^6) + extended (10^8) + deep (2×10^8) for high digits
 //! - Compact u32 prime/inverse tables (84.5 MB cache vs ~169 MB with u64)
+//! - Precomputed m_low mod p: eliminates GMP mod_u from sieve hot path (u64 arithmetic only)
 //! - Inline survivor testing: iterate bitset directly, no Vec<u64> allocation
 //! - Hardware popcount for survivor counting
 //!
@@ -145,21 +146,38 @@ impl SieveData {
     }
 }
 
-/// Run base sieve (primes to 10^6) on a packed bitset.
-/// Each bit in alive[] represents one candidate m value.
-fn base_sieve(alive: &mut [u64], batch_size: usize, m_start: &Integer, sieve: &SieveData) {
-    for (idx, &p) in sieve.primes_small.iter().enumerate() {
-        let p_u64 = p as u64;
-        let inv6 = sieve.inv6_small[idx] as u64;
-        let m_mod_p = m_start.mod_u(p) as u64;
-        let p_us = p as usize;
+/// Precomputed m_low mod p for all sieve primes.
+/// Eliminates expensive GMP mod_u calls from the per-batch hot path.
+/// m_start mod p = (m_low_mod_p + offset mod p) mod p  (all u64 arithmetic).
+struct PrecomputedMods {
+    small: Vec<u32>,
+    ext: Vec<u32>,
+    deep: Vec<u32>,
+}
 
-        // Offset where 6(m_start + r1) - 1 ≡ 0 (mod p)
-        let r1 = if inv6 >= m_mod_p {
-            (inv6 - m_mod_p) as usize
-        } else {
-            (p_u64 + inv6 - m_mod_p) as usize
-        };
+impl PrecomputedMods {
+    fn build(m_low: &Integer, sieve: &SieveData) -> Self {
+        let small: Vec<u32> = sieve.primes_small.iter().map(|&p| m_low.mod_u(p)).collect();
+        let ext: Vec<u32> = sieve.primes_ext.iter().map(|&p| m_low.mod_u(p)).collect();
+        let deep: Vec<u32> = sieve.primes_deep.iter().map(|&p| m_low.mod_u(p)).collect();
+        PrecomputedMods { small, ext, deep }
+    }
+}
+
+/// Sieve core: mark bits where 6(m_start+j)±1 ≡ 0 (mod p).
+/// Uses precomputed m_low mod p + cheap u64 offset arithmetic.
+#[inline(always)]
+fn sieve_prime(alive: &mut [u64], batch_size: usize, p: u32, inv6: u32, m_mod_p: u64, large: bool) {
+    let p_u64 = p as u64;
+    let inv6_u64 = inv6 as u64;
+    let p_us = p as usize;
+
+    let r1 = if inv6_u64 >= m_mod_p {
+        (inv6_u64 - m_mod_p) as usize
+    } else {
+        (p_u64 + inv6_u64 - m_mod_p) as usize
+    };
+    if !large || r1 < batch_size {
         let mut j = r1;
         while j < batch_size {
             unsafe {
@@ -167,14 +185,15 @@ fn base_sieve(alive: &mut [u64], batch_size: usize, m_start: &Integer, sieve: &S
             }
             j += p_us;
         }
+    }
 
-        // Offset where 6(m_start + r2) + 1 ≡ 0 (mod p)
-        let complement = p_u64 - inv6;
-        let r2 = if complement >= m_mod_p {
-            (complement - m_mod_p) as usize
-        } else {
-            (p_u64 + complement - m_mod_p) as usize
-        };
+    let complement = p_u64 - inv6_u64;
+    let r2 = if complement >= m_mod_p {
+        (complement - m_mod_p) as usize
+    } else {
+        (p_u64 + complement - m_mod_p) as usize
+    };
+    if !large || r2 < batch_size {
         let mut j = r2;
         while j < batch_size {
             unsafe {
@@ -185,96 +204,27 @@ fn base_sieve(alive: &mut [u64], batch_size: usize, m_start: &Integer, sieve: &S
     }
 }
 
-/// Run extended sieve (primes 10^6 to 10^8) on a packed bitset.
-fn extended_sieve(
-    alive: &mut [u64],
-    batch_size: usize,
-    m_start: &Integer,
-    sieve: &SieveData,
-) {
-    for (idx, &p) in sieve.primes_ext.iter().enumerate() {
-        let p_u64 = p as u64;
-        let inv6 = sieve.inv6_ext[idx] as u64;
-        let m_mod_p = m_start.mod_u(p) as u64;
-        let p_us = p as usize;
-
-        let r1 = if inv6 >= m_mod_p {
-            (inv6 - m_mod_p) as usize
-        } else {
-            (p_u64 + inv6 - m_mod_p) as usize
-        };
-        if r1 < batch_size {
-            let mut j = r1;
-            while j < batch_size {
-                unsafe {
-                    *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
-                }
-                j += p_us;
-            }
-        }
-
-        let complement = p_u64 - inv6;
-        let r2 = if complement >= m_mod_p {
-            (complement - m_mod_p) as usize
-        } else {
-            (p_u64 + complement - m_mod_p) as usize
-        };
-        if r2 < batch_size {
-            let mut j = r2;
-            while j < batch_size {
-                unsafe {
-                    *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
-                }
-                j += p_us;
-            }
-        }
+/// Run base sieve (primes to 10^6) using precomputed mods.
+fn base_sieve(alive: &mut [u64], batch_size: usize, offset: u64, sieve: &SieveData, mods: &PrecomputedMods) {
+    for (idx, &p) in sieve.primes_small.iter().enumerate() {
+        let m_mod_p = ((mods.small[idx] as u64) + (offset % p as u64)) % p as u64;
+        sieve_prime(alive, batch_size, p, sieve.inv6_small[idx], m_mod_p, false);
     }
 }
 
-/// Run deep sieve (primes 10^8 to 2×10^8) on a packed bitset.
-/// Used for high-digit targets (≥1500 digits) where SPRP testing dominates.
-fn deep_sieve(
-    alive: &mut [u64],
-    batch_size: usize,
-    m_start: &Integer,
-    sieve: &SieveData,
-) {
+/// Run extended sieve (primes 10^6 to 10^8) using precomputed mods.
+fn extended_sieve(alive: &mut [u64], batch_size: usize, offset: u64, sieve: &SieveData, mods: &PrecomputedMods) {
+    for (idx, &p) in sieve.primes_ext.iter().enumerate() {
+        let m_mod_p = ((mods.ext[idx] as u64) + (offset % p as u64)) % p as u64;
+        sieve_prime(alive, batch_size, p, sieve.inv6_ext[idx], m_mod_p, true);
+    }
+}
+
+/// Run deep sieve (primes 10^8 to 2×10^8) using precomputed mods.
+fn deep_sieve(alive: &mut [u64], batch_size: usize, offset: u64, sieve: &SieveData, mods: &PrecomputedMods) {
     for (idx, &p) in sieve.primes_deep.iter().enumerate() {
-        let p_u64 = p as u64;
-        let inv6 = sieve.inv6_deep[idx] as u64;
-        let m_mod_p = m_start.mod_u(p) as u64;
-        let p_us = p as usize;
-
-        let r1 = if inv6 >= m_mod_p {
-            (inv6 - m_mod_p) as usize
-        } else {
-            (p_u64 + inv6 - m_mod_p) as usize
-        };
-        if r1 < batch_size {
-            let mut j = r1;
-            while j < batch_size {
-                unsafe {
-                    *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
-                }
-                j += p_us;
-            }
-        }
-
-        let complement = p_u64 - inv6;
-        let r2 = if complement >= m_mod_p {
-            (complement - m_mod_p) as usize
-        } else {
-            (p_u64 + complement - m_mod_p) as usize
-        };
-        if r2 < batch_size {
-            let mut j = r2;
-            while j < batch_size {
-                unsafe {
-                    *alive.get_unchecked_mut(j >> 6) &= !(1u64 << (j & 63));
-                }
-                j += p_us;
-            }
-        }
+        let m_mod_p = ((mods.deep[idx] as u64) + (offset % p as u64)) % p as u64;
+        sieve_prime(alive, batch_size, p, sieve.inv6_deep[idx], m_mod_p, true);
     }
 }
 
@@ -466,6 +416,13 @@ fn search_twins(
         words * 8 / 1024
     );
 
+    // Precompute m_low mod p for all sieve primes (one-time GMP mod_u).
+    // All subsequent batches use cheap u64 arithmetic: (m_low_mod_p + offset%p) % p.
+    let t_pre2 = Instant::now();
+    let precomputed = PrecomputedMods::build(&m_low, sieve);
+    let precompute_time = t_pre2.elapsed().as_secs_f64();
+    println!("  Precomputed mod_u: {:.2}s (eliminates GMP division from sieve hot path)", precompute_time);
+
     let t0 = Instant::now();
     let found_flag = Arc::new(AtomicBool::new(false));
     let mut total_raw: u64 = 0;
@@ -480,31 +437,33 @@ fn search_twins(
         let mut rng = rand::thread_rng();
         let round_base = rng.gen_range(0u64..m_range_u64);
         let stride = batch_size as u64;
-        let batch_starts: Vec<Integer> = (0..num_workers)
+        let batch_starts: Vec<(u64, Integer)> = (0..num_workers)
             .map(|i| {
                 let offset = (round_base + (i as u64) * stride) % m_range_u64;
-                Integer::from(&m_low + offset)
+                let m_start = Integer::from(&m_low + offset);
+                (offset, m_start)
             })
             .collect();
 
         let flag = found_flag.clone();
         let deadline = max_seconds;
         let depth = sieve_depth;
+        let pc = &precomputed;
         let results: Vec<_> = batch_starts
             .into_par_iter()
-            .map(|m_start| {
+            .map(|(offset, m_start)| {
                 if flag.load(Ordering::Relaxed) {
                     return (0u64, 0u64, 0u64, None);
                 }
 
-                // Sieve phase: packed bitset (8x smaller than bool array)
+                // Sieve phase: uses precomputed mods (no GMP mod_u calls)
                 let mut alive = vec![u64::MAX; words];
-                base_sieve(&mut alive, batch_size, &m_start, sieve);
+                base_sieve(&mut alive, batch_size, offset, sieve, pc);
                 if depth >= 1 {
-                    extended_sieve(&mut alive, batch_size, &m_start, sieve);
+                    extended_sieve(&mut alive, batch_size, offset, sieve, pc);
                 }
                 if depth >= 2 {
-                    deep_sieve(&mut alive, batch_size, &m_start, sieve);
+                    deep_sieve(&mut alive, batch_size, offset, sieve, pc);
                 }
 
                 // Count survivors via hardware popcount (no Vec allocation)
@@ -610,7 +569,7 @@ fn search_twins(
 
 fn main() {
     let num_workers = num_cpus::get();
-    println!("Twin Prime Engine v5.1 (Rust + GMP, optimized)");
+    println!("Twin Prime Engine v5.2 (Rust + GMP, optimized)");
     println!(
         "Rayon x{} | In-place SPRP(2,3,5,7) + BPPSW | 3-tier sieve | Montgomery modpow",
         num_workers
@@ -714,7 +673,7 @@ fn main() {
     }
 
     let output = serde_json::json!({
-        "version": "v5.1-rust-gmp-3tier-sieve",
+        "version": "v5.2-rust-gmp-precomputed-mod",
         "workers": num_workers,
         "results": all_results,
     });

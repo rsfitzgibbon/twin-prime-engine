@@ -13,10 +13,9 @@ Do not use it as the scratchpad for one-off research experiments.
 
 Experimental branch:
 
-- `Newtheory`
+- `Newtheory` (separate research branch)
 
 Promotion rule:
 
 - stable work from `Newtheory` can be promoted here
 - duplicated shared files should be owned here, not co-evolved independently in both branches
-
