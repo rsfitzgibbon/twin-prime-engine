@@ -6,6 +6,7 @@ description = "High-performance twin prime search engine with GMP-accelerated ar
 
 [dependencies]
 rug = { version = "1", features = ["integer"] }
+gmp-mpfr-sys = { version = "1.7.0", features = ["c-no-tests"] }
 rayon = "1"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }

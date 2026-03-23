@@ -157,6 +157,10 @@ def parse_pfgw_hits(text: str, expected_n: int, sign: str):
     hits = {}
     for line in text.splitlines():
         lower = line.lower()
+        # PFGW emits many progress lines of the form "PRP: ...".
+        # Only lines with an explicit final result ("is ...") count as hits.
+        if " is " not in lower:
+            continue
         if "prp" not in lower and "prime" not in lower:
             continue
         match = FORMULA_RE.search(line)
